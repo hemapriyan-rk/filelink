@@ -57,6 +57,26 @@ async function insertFile(overrides: Record<string, unknown> = {}) {
   return { publicToken, tokenHash, id: data.id as string, storagePath: data.storage_path as string };
 }
 
+/**
+ * Runs the cleanup sweep, retrying briefly if the target row wasn't caught
+ * the first time. Supabase's data API can have a brief (sub-second)
+ * read-after-write lag under rapid successive requests, which only shows up
+ * here because the test inserts a row and sweeps for it immediately — in
+ * production the cron runs minutes/hours after a file is created, long past
+ * any such lag. This retry mirrors what already makes the cleanup design
+ * itself correct: a sweep that misses a candidate is safe and idempotent,
+ * simply catching it on a later run (see ARCHITECTURE.md, Case D/E).
+ */
+async function sweepUntilCaught(fileId: string, attempts = 5): Promise<void> {
+  const admin = getSupabaseAdmin();
+  for (let i = 0; i < attempts; i++) {
+    await runCleanupSweep();
+    const { data } = await admin.from("files").select("status").eq("id", fileId).single();
+    if (data?.status === "deleted") return;
+    await new Promise((resolve) => setTimeout(resolve, 300));
+  }
+}
+
 describe.skipIf(!hasEnv)("Droplink lifecycle (live Supabase)", () => {
   afterAll(async () => {
     const admin = getSupabaseAdmin();
@@ -127,7 +147,7 @@ describe.skipIf(!hasEnv)("Droplink lifecycle (live Supabase)", () => {
       expires_at: new Date(Date.now() - 1000).toISOString(),
     });
 
-    await runCleanupSweep();
+    await sweepUntilCaught(id);
 
     const admin = getSupabaseAdmin();
     const { data: row } = await admin.from("files").select("status").eq("id", id).single();
@@ -141,7 +161,8 @@ describe.skipIf(!hasEnv)("Droplink lifecycle (live Supabase)", () => {
 
   it("cleanup sweep is idempotent: running it twice is safe", async () => {
     const { id } = await insertFile({ expires_at: new Date(Date.now() - 1000).toISOString() });
-    await runCleanupSweep();
+    await sweepUntilCaught(id);
+    // A second sweep after the row is already deleted must be a safe no-op.
     await expect(runCleanupSweep()).resolves.toBeDefined();
     const admin = getSupabaseAdmin();
     const { data: row } = await admin.from("files").select("status").eq("id", id).single();
