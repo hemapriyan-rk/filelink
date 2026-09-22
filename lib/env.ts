@@ -23,6 +23,14 @@ export const serverEnv = {
   get siteUrl() {
     return required("NEXT_PUBLIC_SITE_URL");
   },
+  /**
+   * Base32 TOTP secret for the admin override code. Optional by design —
+   * if it's not configured, adminCode is simply never accepted and every
+   * upload is held to the standard limits. Never sent to the browser.
+   */
+  get adminTotpSecret(): string | null {
+    return process.env.ADMIN_TOTP_SECRET || null;
+  },
 };
 
 // Safe to import from client components.

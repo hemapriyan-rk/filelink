@@ -36,13 +36,20 @@ Supabase Dashboard:
    `cleanup_candidates` functions. It's written to be safe to re-run
    (`create ... if not exists` / `create or replace`).
 
-3. **Storage → New bucket**: name it exactly `droplink`, and leave it
+3. **SQL Editor → New query** again, paste the contents of
+   `supabase/migrations/0002_abuse.sql`, and run it. This adds the
+   `abuse_ips` table and `record_strike` function backing the escalating
+   ban system (§8).
+
+4. **Storage → New bucket**: name it exactly `droplink`, and leave it
    **private** (do not enable "Public bucket"). No further bucket
    configuration is needed — all access goes through signed URLs minted by
    the server.
 
-4. Generate a `CRON_SECRET` (any long random value, e.g.
+5. Generate a `CRON_SECRET` (any long random value, e.g.
    `openssl rand -hex 32`) and set it in `.env.local` and later in Vercel.
+
+6. (Optional) Set up the admin override code — see §8.
 
 ## 3. Environment variables
 
@@ -53,7 +60,7 @@ See `.env.example` for the full list with inline documentation. Summary:
 `NEXT_PUBLIC_SITE_URL`.
 
 **Server-only** (never shipped to the browser, never committed):
-`SUPABASE_SERVICE_ROLE_KEY`, `CRON_SECRET`.
+`SUPABASE_SERVICE_ROLE_KEY`, `CRON_SECRET`, `ADMIN_TOTP_SECRET` (optional).
 
 ## 4. Testing
 
@@ -66,8 +73,8 @@ sanitization, and rate limiting — no network required.
 
 Integration tests (`tests/integration/`) run the full lifecycle
 (upload → active → download, expiration, cleanup, keep-permanently,
-invalid token, concurrent download-limit enforcement) against your **real**
-Supabase project from §2. They auto-skip if `NEXT_PUBLIC_SUPABASE_URL` /
+invalid token, concurrent download-limit enforcement) and the abuse ban
+escalation (§6) against your **real** Supabase project from §2. They auto-skip if `NEXT_PUBLIC_SUPABASE_URL` /
 `SUPABASE_SERVICE_ROLE_KEY` aren't set, so `npm test` is always safe to run.
 To actually execute them, make sure `.env.local` is filled in — Next.js
 loads it automatically, but if you run `vitest` directly rather than
@@ -82,12 +89,12 @@ empty table and are safe to run against a project with real data in it.
 
 1. Push this repo to GitHub (or your Git provider of choice) and import it
    in Vercel.
-2. In **Project Settings → Environment Variables**, add all five variables
-   from §3 (both client-safe and server-only — Vercel keeps server-only
-   ones out of the client bundle automatically based on the
-   `NEXT_PUBLIC_` prefix convention Next.js uses at build time). Set
-   `NEXT_PUBLIC_SITE_URL` to your production URL (e.g.
-   `https://cratelink.vercel.app`).
+2. In **Project Settings → Environment Variables**, add the variables from
+   §3 (both client-safe and server-only — Vercel keeps server-only ones
+   out of the client bundle automatically based on the `NEXT_PUBLIC_`
+   prefix convention Next.js uses at build time; `ADMIN_TOTP_SECRET` is
+   optional, see §6). Set `NEXT_PUBLIC_SITE_URL` to your production URL
+   (e.g. `https://cratelink.vercel.app`).
 3. Deploy. `vercel.json` already declares the cleanup cron job.
 4. **Cron frequency note:** Vercel's Hobby plan only allows daily cron
    triggers; `vercel.json` is set to run once a day
@@ -98,7 +105,64 @@ empty table and are safe to run against a project with real data in it.
    objects are physically removed from storage. On a Pro plan, you can
    tighten the schedule (e.g. `*/15 * * * *`) with no other code changes.
 
-## 6. Known limitations
+## 6. Admin override code, abuse bans, and multi-file uploads
+
+**Admin override code.** Standard uploads are capped at
+`MAX_FILE_SIZE_BYTES` (500 MB) and `MAX_EXPIRATION_MINUTES` (30 days). A
+6-digit TOTP code — the same kind an authenticator app (Google
+Authenticator, Authy, 1Password, etc.) generates, not a static password —
+unlocks `MAX_FILE_SIZE_BYTES_ADMIN` (5 GB) and
+`MAX_EXPIRATION_MINUTES_ADMIN` (1 year) for that upload. There is no admin
+account or login — it's one shared secret (`ADMIN_TOTP_SECRET`) that you
+add to an authenticator app once. To set it up:
+
+1. Generate a base32 secret (`lib/totp.ts` exports `base32Encode` if you
+   want to derive one from random bytes yourself, or use any TOTP secret
+   generator).
+2. Set `ADMIN_TOTP_SECRET` to that value in `.env.local` and in Vercel.
+3. Add a manual TOTP entry to your authenticator app: issuer `CrateLink`,
+   the same secret, 6 digits, 30 second period, SHA1.
+4. In the upload form, click "Have an admin code?" and enter the current
+   6-digit code from the app to unlock the higher limits for that batch.
+
+If `ADMIN_TOTP_SECRET` is never set, the admin code field is simply never
+accepted — every upload is held to the standard limits, no configuration
+required.
+
+**Abuse bans.** Every rejected attempt to exceed the standard limits
+without a valid admin code (oversized file, over-long expiration, a wrong
+admin code, or repeatedly tripping the request-rate limiter) counts as a
+strike against the requester's IP. Reaching `STRIKE_THRESHOLD` (5) strikes
+within `STRIKE_WINDOW_MINUTES` (30) bans that IP for `BASE_BAN_MINUTES`
+(1 hour), doubling on each repeat offense up to `MAX_BAN_MINUTES`
+(24 hours). This is tracked in Postgres (`abuse_ips` table,
+`supabase/migrations/0002_abuse.sql`), not in memory — an in-memory ban
+would reset on every serverless cold start and provide essentially no real
+protection. See `ARCHITECTURE.md` §14 for the full rationale.
+
+**Multi-file uploads.** The upload form accepts up to `MAX_FILES_PER_BATCH`
+(50) files at once, sharing one set of expiration/downloads/admin-code
+settings, uploaded with limited concurrency. Each file still gets its own
+independent share link and token — this is a batch of individual links,
+not one link covering multiple files. (A single link that unlocks several
+files together would need a schema change — a "crate contains many files"
+concept — that this version doesn't implement; ask if that's actually what
+you want instead.)
+
+## 7. Cookie consent & link persistence
+
+The only client-side persistence this app does is remembering the visitor's
+most recent upload result(s) so switching tabs or an accidental refresh
+doesn't lose a share link/QR code they haven't copied yet. This is
+implemented with `sessionStorage` (tab-scoped, cleared when the tab closes,
+never transmitted to the server) rather than an actual HTTP cookie — a
+real cookie would need to be sent to the server on every request for no
+benefit here, since nothing server-side needs to read this state. A banner
+(`components/ConsentBanner.tsx`) asks for consent before anything is
+written; declining just means results don't survive a refresh, with no
+other functional change.
+
+## 8. Known limitations
 
 - The upload rate limiter is in-memory per serverless instance (see
   `lib/ratelimit.ts`) — a reasonable speed bump for a personal tool, not a
@@ -111,8 +175,18 @@ empty table and are safe to run against a project with real data in it.
   by the app, but very large uploads are still bounded by your Supabase
   plan's storage limits and the browser's own upload reliability over
   the connection in use.
+- Abuse bans are per-IP. Anyone sharing a NAT/public IP with someone who
+  got banned (a household, an office, a mobile carrier's CGNAT) is banned
+  along with them — a known tradeoff of IP-based limiting at this scale,
+  not something worth a more complex identity system for a personal tool.
+- The admin TOTP code has no separate rate limit of its own beyond the
+  general strike system — a wrong code is a strike like any other
+  violation, capped at `STRIKE_THRESHOLD` attempts before a ban, on top of
+  the code itself rotating every 30 seconds.
+- Multi-file uploads produce one independent link per file, not one link
+  for the whole batch — see §6.
 
-## 7. Security assumptions
+## 9. Security assumptions
 
 - The service-role key and `CRON_SECRET` are kept out of version control
   and out of the browser bundle; anyone who obtains either has full control

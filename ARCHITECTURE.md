@@ -330,7 +330,9 @@ oversight.
 In scope, and addressed above: token guessing, URL enumeration, malicious/
 oversized uploads, expired-link bypass, signed-URL leakage (mitigated by
 60-second expiry), path traversal, XSS via filename, credential exposure,
-direct bucket access (bucket is private), concurrent download-limit bypass.
+direct bucket access (bucket is private), concurrent download-limit bypass,
+scripted abuse of upload limits (escalating IP bans, §14), brute-forcing
+the admin override code (each wrong attempt is itself a strike, §14).
 
 Explicitly out of scope, per the brief: enterprise-grade DDoS protection,
 Redis-backed distributed rate limiting, multi-region infrastructure. The
@@ -348,5 +350,87 @@ Supabase (Postgres for one `files` table + 2 SQL functions,
 ```
 
 No queues, no Redis, no separate backend, no microservices — one Next.js
-app, one Postgres table, one storage bucket. See `README.md` for setup and
+app, two Postgres tables, one storage bucket. See `README.md` for setup and
 deployment steps.
+
+## 14. Admin override code & abuse bans
+
+**Why TOTP instead of a static admin password.** The brief for this
+addition explicitly ruled out logins/accounts, and a personal tool has no
+natural place to put a login anyway. A static shared password satisfies
+"no accounts" too, but has a specific weakness a rotating code doesn't:
+once it leaks (shoulder-surfed, logged somewhere, pasted in the wrong
+chat), it's valid forever until manually changed. A TOTP code
+(`lib/totp.ts`, RFC 6238, verified against the RFC's own published test
+vectors in `tests/unit/totp.test.ts`) is worthless 30 seconds after it's
+generated even if someone does see it — the only thing that actually
+needs to stay secret is `ADMIN_TOTP_SECRET`, which never leaves the
+server and is never even logged. This is the same tradeoff Google
+Authenticator/Authy exist to make, reused here for exactly one code
+instead of a login system.
+
+**Why the code only ever raises limits, never grants anything else.** A
+valid admin code changes exactly two numbers for that one request —
+`MAX_FILE_SIZE_BYTES_ADMIN` instead of `MAX_FILE_SIZE_BYTES`,
+`MAX_EXPIRATION_MINUTES_ADMIN` instead of `MAX_EXPIRATION_MINUTES` — and
+nothing else. It doesn't bypass sanitization, doesn't disable strikes for
+*other* kinds of abuse (a wrong admin code is itself a strike), and
+doesn't create a session or a cookie. There is no state that "being admin"
+sets beyond the parameters of that one `/api/upload/init` call.
+
+**Why bans live in Postgres, not `lib/ratelimit.ts`.** The existing
+in-memory rate limiter is explicitly documented (see its own file) as a
+best-effort, per-serverless-instance speed bump that resets on cold start
+— an acceptable tradeoff for slowing down accidental double-submits, but
+not for something with real teeth. A ban is supposed to mean "this IP
+cannot use the app for the next N hours"; if that state lived in a Lambda
+instance's memory, it would evaporate the moment Vercel spins up a fresh
+instance, which on a low-traffic personal tool could be every single
+request. `abuse_ips` (0002_abuse.sql) reuses the database this app
+already has rather than standing up Redis or another service — the same
+"don't add infrastructure a personal tool doesn't need" principle behind
+every other choice in this document.
+
+**Why strikes escalate atomically via a SQL function, not
+read-then-write in the route handler.** Same race-condition reasoning as
+`consume_download` (§8, Case C): if two abusive requests from the same IP
+land in the same moment, a naive "read strikes, compute strikes+1, write
+it back" would let both requests read the same stale count and only
+record one strike between them — exactly the scenario a ban system exists
+to prevent. `record_strike()` does the read-check-escalate-write as one
+statement, so Postgres's own row locking makes concurrent strikes from
+the same IP serialize correctly. Verified in
+`tests/integration/abuse.test.ts`, including that ban duration actually
+escalates (doubles, capped) on repeat offenses.
+
+**Why only `/api/upload/init` checks for a ban, not download or
+keep-permanent.** The abuse this system targets — oversized files, batches
+that ignore the file-count cap, brute-forcing the admin code — all
+happens at the point of *creating* a new upload. A recipient downloading a
+file someone legitimately shared with them is a different person on a
+different IP in the overwhelming majority of cases, and banning by IP at
+the download endpoint would risk punishing an innocent recipient for
+something the uploader did. Scoping the check to the one endpoint that
+actually consumes resources keeps the blast radius on the person actually
+causing it.
+
+## 15. Multi-file uploads
+
+Each file in a batch still goes through the exact same single-file
+pipeline as before (`/api/upload/init` → signed upload → `/api/upload/confirm`),
+called once per file with limited client-side concurrency
+(`components/UploadForm.tsx`, `CONCURRENCY = 3`). This was a deliberate
+choice over redesigning `/api/upload/init` to accept an array: the
+existing single-file endpoint is already fully race-safe, tested, and
+simple, and a client-side queue gets the "upload several files" UX without
+touching any of that.
+
+**This produces N independent share links, not one link for N files.**
+Bundling several files behind a single shareable link (a "crate contains
+many files" concept) is a materially different feature — it needs a new
+relationship in the schema, a download page that lists multiple files
+instead of showing one, and new semantics for what "expired" or "kept
+permanently" means for a group. That's a real feature this version does
+not build; `MAX_FILES_PER_BATCH` (50) instead caps how many independent
+links a single visit can generate in one go, enforced by the existing
+per-IP rate limit and strike system rather than a new one.

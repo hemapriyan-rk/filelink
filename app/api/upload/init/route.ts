@@ -3,19 +3,43 @@ import { getSupabaseAdmin } from "@/lib/supabase-admin";
 import { generatePublicToken, generateStorageKey, hashToken } from "@/lib/token";
 import { sanitizeFilename, sanitizeMimeType } from "@/lib/sanitize";
 import { checkRateLimit, clientIpFrom } from "@/lib/ratelimit";
+import { checkBan, recordStrike } from "@/lib/abuse";
+import { verifyTotp } from "@/lib/totp";
 import { serverEnv } from "@/lib/env";
 import {
   ALLOWED_MAX_DOWNLOADS,
   MAX_EXPIRATION_MINUTES,
+  MAX_EXPIRATION_MINUTES_ADMIN,
   MAX_FILE_SIZE_BYTES,
+  MAX_FILE_SIZE_BYTES_ADMIN,
   MIN_EXPIRATION_MINUTES,
   STORAGE_BUCKET,
 } from "@/lib/constants";
 
+const ABUSE_WARNING = " Repeated attempts to bypass this limit will result in a temporary ban.";
+
+function bannedResponse(bannedUntil: string | null) {
+  return NextResponse.json(
+    {
+      error: "This IP has been temporarily banned for repeated abuse.",
+      bannedUntil,
+    },
+    { status: 403 }
+  );
+}
+
 export async function POST(req: NextRequest) {
   const ip = clientIpFrom(req.headers);
-  const rate = checkRateLimit(`upload-init:${ip}`, 20, 10 * 60 * 1000);
+
+  const ban = await checkBan(ip);
+  if (ban.banned) {
+    return bannedResponse(ban.bannedUntil);
+  }
+
+  const rate = checkRateLimit(`upload-init:${ip}`, 60, 10 * 60 * 1000);
   if (!rate.allowed) {
+    const strike = await recordStrike(ip);
+    if (strike.banned) return bannedResponse(strike.bannedUntil);
     return NextResponse.json(
       { error: "Too many uploads. Please try again shortly." },
       { status: 429, headers: { "Retry-After": String(rate.retryAfterSeconds) } }
@@ -29,32 +53,68 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Invalid request body." }, { status: 400 });
   }
 
-  const { filename, mimeType, sizeBytes, expiresMinutes, maxDownloads } = (body ?? {}) as Record<
-    string,
-    unknown
-  >;
+  const { filename, mimeType, sizeBytes, expiresMinutes, maxDownloads, adminCode } = (body ??
+    {}) as Record<string, unknown>;
+
+  // An admin code only ever RAISES the ceiling — never lowers requirements,
+  // never grants anything beyond bigger size/longer expiration. If it's
+  // wrong, that's a strike (brute-force attempts against a 6-digit rotating
+  // code are exactly the kind of thing this system exists to deter); if
+  // it's simply absent, that's just a normal request at standard limits.
+  let isAdmin = false;
+  if (typeof adminCode === "string" && adminCode.trim().length > 0) {
+    const secret = serverEnv.adminTotpSecret;
+    isAdmin = !!secret && verifyTotp(secret, adminCode);
+    if (!isAdmin) {
+      const strike = await recordStrike(ip);
+      if (strike.banned) return bannedResponse(strike.bannedUntil);
+      return NextResponse.json({ error: "Invalid admin code." }, { status: 403 });
+    }
+  }
+
+  const maxFileSize = isAdmin ? MAX_FILE_SIZE_BYTES_ADMIN : MAX_FILE_SIZE_BYTES;
+  const maxExpiration = isAdmin ? MAX_EXPIRATION_MINUTES_ADMIN : MAX_EXPIRATION_MINUTES;
 
   if (typeof sizeBytes !== "number" || !Number.isFinite(sizeBytes) || sizeBytes <= 0) {
     return NextResponse.json({ error: "Invalid file size." }, { status: 400 });
   }
-  if (sizeBytes > MAX_FILE_SIZE_BYTES) {
+  if (sizeBytes > maxFileSize) {
+    if (!isAdmin) {
+      const strike = await recordStrike(ip);
+      if (strike.banned) return bannedResponse(strike.bannedUntil);
+    }
     return NextResponse.json(
-      { error: `File exceeds the ${MAX_FILE_SIZE_BYTES / (1024 * 1024)} MB limit.` },
+      {
+        error:
+          `File exceeds the ${Math.floor(maxFileSize / (1024 * 1024))} MB limit.` +
+          (isAdmin ? "" : ABUSE_WARNING),
+      },
       { status: 413 }
     );
   }
+
   if (
     typeof expiresMinutes !== "number" ||
     !Number.isFinite(expiresMinutes) ||
     !Number.isInteger(expiresMinutes) ||
     expiresMinutes < MIN_EXPIRATION_MINUTES ||
-    expiresMinutes > MAX_EXPIRATION_MINUTES
+    expiresMinutes > maxExpiration
   ) {
+    if (!isAdmin && typeof expiresMinutes === "number" && expiresMinutes > MAX_EXPIRATION_MINUTES) {
+      const strike = await recordStrike(ip);
+      if (strike.banned) return bannedResponse(strike.bannedUntil);
+    }
     return NextResponse.json(
-      { error: `Expiration must be between ${MIN_EXPIRATION_MINUTES} minute and 30 days.` },
+      {
+        error:
+          `Expiration must be between ${MIN_EXPIRATION_MINUTES} minute and ${Math.floor(
+            maxExpiration / (24 * 60)
+          )} days.` + (isAdmin ? "" : ABUSE_WARNING),
+      },
       { status: 400 }
     );
   }
+
   let normalizedMaxDownloads: number | null = null;
   if (maxDownloads !== null && maxDownloads !== undefined) {
     if (

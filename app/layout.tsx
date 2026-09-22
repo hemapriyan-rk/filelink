@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Bebas_Neue, IBM_Plex_Mono, IBM_Plex_Sans } from "next/font/google";
 import "./globals.css";
 import { Footer } from "@/components/Footer";
+import { ConsentBanner } from "@/components/ConsentBanner";
 
 const displayFont = Bebas_Neue({
   variable: "--font-display",
@@ -35,6 +36,7 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
       <body className="min-h-full flex flex-col">
         <div className="flex-1 flex flex-col">{children}</div>
         <Footer />
+        <ConsentBanner />
       </body>
     </html>
   );
