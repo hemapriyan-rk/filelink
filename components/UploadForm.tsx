@@ -13,7 +13,9 @@ import {
   STORAGE_BUCKET,
 } from "@/lib/constants";
 import { hasConsent } from "@/lib/consent";
+import { zipFiles } from "@/lib/zip";
 import { CountdownTimer } from "./CountdownTimer";
+import { StatsToggle } from "./StatsToggle";
 
 type Stage = "idle" | "uploading" | "ready" | "banned";
 const CUSTOM = "custom" as const;
@@ -158,6 +160,10 @@ function ResultRow({ result }: { result: FileResult }) {
           </button>
         )}
       </div>
+
+      <div className="mt-3">
+        <StatsToggle token={result.publicToken} />
+      </div>
     </div>
   );
 }
@@ -170,6 +176,8 @@ export function UploadForm() {
   const [maxDownloads, setMaxDownloads] = useState<number | "">("");
   const [showAdminField, setShowAdminField] = useState(false);
   const [adminCode, setAdminCode] = useState("");
+  const [bundleAsZip, setBundleAsZip] = useState(false);
+  const [zipProgress, setZipProgress] = useState<number | null>(null);
   const [stage, setStage] = useState<Stage>("idle");
   const [error, setError] = useState<string | null>(null);
   const [bannedUntil, setBannedUntil] = useState<string | null>(null);
@@ -327,6 +335,48 @@ export function UploadForm() {
     }
   }
 
+  async function handleZipUpload(expiresMinutes: number) {
+    setZipProgress(0);
+    let zipBlob: Blob;
+    try {
+      zipBlob = await zipFiles(
+        queue.map((q) => ({ name: q.file.name, file: q.file })),
+        (fraction) => setZipProgress(fraction)
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not create the zip file.");
+      setZipProgress(null);
+      setStage("idle");
+      return;
+    }
+    setZipProgress(null);
+
+    const zipName = `crate-${new Date().toISOString().slice(0, 10)}-${queue.length}-files.zip`;
+    const zipFile = new File([zipBlob], zipName, { type: "application/zip" });
+    const zipItem: QueueItem = { id: "zip-bundle", file: zipFile, status: "uploading" };
+    setQueue([zipItem]);
+
+    let done: QueueItem;
+    try {
+      done = await uploadOne(zipItem, expiresMinutes);
+    } catch (err) {
+      const banned = (err as { bannedUntil?: string }).bannedUntil ?? null;
+      setBannedUntil(banned);
+      setStage("banned");
+      return;
+    }
+    setQueue([done]);
+
+    if (done.status === "done" && done.result && hasConsent()) {
+      try {
+        sessionStorage.setItem(SESSION_KEY, JSON.stringify([done.result]));
+      } catch {
+        // storage unavailable — non-fatal
+      }
+    }
+    setStage("ready");
+  }
+
   async function handleUpload() {
     if (queue.length === 0) return;
     const resolved = resolveExpiresMinutes();
@@ -338,6 +388,12 @@ export function UploadForm() {
 
     setError(null);
     setStage("uploading");
+
+    if (bundleAsZip && queue.length > 1) {
+      await handleZipUpload(expiresMinutes);
+      return;
+    }
+
     setQueue((prev) => prev.map((q) => ({ ...q, status: "uploading" as const })));
 
     const pending = [...queue];
@@ -384,6 +440,8 @@ export function UploadForm() {
     setQueue([]);
     setStage("idle");
     setError(null);
+    setBundleAsZip(false);
+    setZipProgress(null);
     try {
       sessionStorage.removeItem(SESSION_KEY);
     } catch {
@@ -504,6 +562,40 @@ export function UploadForm() {
         </div>
       )}
 
+      {queue.length > 1 && (
+        <div>
+          <label className="flex items-start gap-2 text-sm cursor-pointer">
+            <input
+              type="checkbox"
+              checked={bundleAsZip}
+              onChange={(e) => setBundleAsZip(e.target.checked)}
+              disabled={uploading}
+              className="mt-0.5"
+            />
+            <span>
+              Bundle as one .zip
+              <span className="block text-xs text-[var(--ink-soft)]">
+                One link instead of {queue.length}. Compression mainly helps for text/uncompressed
+                files — photos and video won&apos;t shrink much.
+              </span>
+            </span>
+          </label>
+          {zipProgress !== null && (
+            <div className="mt-2">
+              <div className="h-1.5 rounded-full bg-[var(--line)] overflow-hidden">
+                <div
+                  className="h-full bg-[var(--crate-red)] transition-all"
+                  style={{ width: `${Math.round(zipProgress * 100)}%` }}
+                />
+              </div>
+              <p className="text-xs text-[var(--ink-soft)] mt-1">
+                Compressing… {Math.round(zipProgress * 100)}%
+              </p>
+            </div>
+          )}
+        </div>
+      )}
+
       <div className="flex flex-col gap-4">
         <div>
           <div className="text-sm mb-1.5">Expires</div>
@@ -593,7 +685,15 @@ export function UploadForm() {
         disabled={queue.length === 0 || uploading}
         className="w-full rounded-md bg-[var(--crate-red)] text-white font-medium py-3 disabled:opacity-40 disabled:cursor-not-allowed hover:bg-[var(--crate-red-deep)] transition-colors"
       >
-        {uploading ? "Shipping…" : queue.length > 1 ? `Ship ${queue.length} files` : "Ship it"}
+        {uploading
+          ? zipProgress !== null
+            ? "Compressing…"
+            : "Shipping…"
+          : queue.length > 1
+            ? bundleAsZip
+              ? "Ship as one .zip"
+              : `Ship ${queue.length} files`
+            : "Ship it"}
       </button>
     </div>
   );

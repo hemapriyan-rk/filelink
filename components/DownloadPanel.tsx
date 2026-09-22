@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { CountdownTimer } from "./CountdownTimer";
+import { StatsToggle } from "./StatsToggle";
 
 export function DownloadPanel({
   token,
@@ -36,6 +37,7 @@ export function DownloadPanel({
       >
         Download file
       </a>
+      <StatsToggle token={token} />
     </div>
   );
 }

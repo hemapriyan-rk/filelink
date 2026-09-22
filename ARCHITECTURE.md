@@ -425,12 +425,78 @@ existing single-file endpoint is already fully race-safe, tested, and
 simple, and a client-side queue gets the "upload several files" UX without
 touching any of that.
 
-**This produces N independent share links, not one link for N files.**
-Bundling several files behind a single shareable link (a "crate contains
-many files" concept) is a materially different feature — it needs a new
-relationship in the schema, a download page that lists multiple files
-instead of showing one, and new semantics for what "expired" or "kept
-permanently" means for a group. That's a real feature this version does
-not build; `MAX_FILES_PER_BATCH` (50) instead caps how many independent
-links a single visit can generate in one go, enforced by the existing
-per-IP rate limit and strike system rather than a new one.
+**By default this produces N independent share links, not one link for N
+files.** Bundling several files behind a single shareable link (a "crate
+contains many files" concept) as a *server-side* feature is materially
+different — it needs a new relationship in the schema, a download page
+that lists multiple files instead of showing one, and new semantics for
+what "expired" or "kept permanently" means for a group. That's a real
+feature this version does not build server-side; `MAX_FILES_PER_BATCH`
+(50) instead caps how many independent links a single visit can generate
+in one go, enforced by the existing per-IP rate limit and strike system
+rather than a new one. §16 covers the client-side alternative that covers
+the common case of this same request without any of that schema work.
+
+## 16. Client-side ZIP bundling
+
+**Why client-side, not a server-side archive step.** The entire point of
+§2's direct-to-storage architecture is that file bytes never pass through
+the Vercel function. A server-side "zip these files together" step would
+require the opposite — proxying every byte of every file through a
+serverless function to archive them — reintroducing exactly the body-size
+and bandwidth problem that architecture was chosen to avoid. Doing the
+zipping in the browser instead (`lib/zip.ts`) keeps the invariant intact:
+the only thing that changes is that the browser now uploads one blob
+(the zip) instead of several, through the identical signed-upload-URL
+pipeline used for every other upload.
+
+**Why streaming compression, not "read everything into memory, then
+zip."** This app allows up to 50 files per batch and, with a valid admin
+code, up to 5 GB per file — a naive approach that reads each file fully
+into memory before compressing would mean holding a file's raw bytes and
+its compressed copy in the browser's heap simultaneously, for files that
+can individually approach the browser's practical memory ceiling.
+`lib/zip.ts` instead uses `fflate`'s streaming `Zip`/`AsyncZipDeflate`
+classes: each file is read via `File.stream()` and pushed into the
+compressor a chunk at a time, so memory use stays proportional to chunk
+size, not file size. Compression itself runs off the main thread (fflate
+spins up a Web Worker for `AsyncZipDeflate` automatically), so a large
+batch doesn't freeze the tab while it compresses.
+
+**Why this is presented as an opt-in checkbox, not automatic.** Two
+honest reasons, both stated directly in the UI copy rather than left
+implicit: compression only meaningfully shrinks text/uncompressed data —
+photos, video, and already-compressed archives see little to no benefit
+and the UI says so rather than overpromising "saves space" universally.
+And bundling changes what the recipient gets (one .zip they have to
+extract, instead of individual files) — a real behavior change a sender
+should choose deliberately, not one the app should impose silently above
+some arbitrary size threshold.
+
+Verified against real `unzip` tooling end to end (not just fflate's own
+correctness) during development: files zipped through this exact code
+path, uploaded through the real API, downloaded via the real signed URL,
+and extracted with standard `unzip` came back byte-identical to the
+originals.
+
+## 17. File stats endpoint
+
+`GET /api/stats/[token]` (`app/api/stats/[token]/route.ts`) exposes
+download count, remaining downloads, creation time, and expiry for a
+share link, reusing `lookupActiveFile` — the exact same validity
+predicate as the download page and `consume_download`. This is
+deliberate: a token that's expired, exhausted, or never existed gets the
+identical generic "not found" response here as everywhere else in the
+app, so the stats endpoint can't be used to distinguish those cases or to
+probe for tokens that used to exist.
+
+This is not a new privilege boundary. Anyone who already has the token
+can see the file's name, size, and expiry on the `/f/[token]` page itself
+— the stats endpoint surfaces a few more fields (download count
+specifically) behind the same "you have the 256-bit token" trust level
+that already gates everything else about that file. It's a separate
+endpoint rather than data baked into the initial page render specifically
+so the UI can refresh the numbers on demand (`components/StatsToggle.tsx`,
+used from both the uploader's result card and the recipient's download
+page) without a full page reload — download count changes as other
+people use the link after the page was first loaded.

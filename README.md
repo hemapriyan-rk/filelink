@@ -142,14 +142,38 @@ protection. See `ARCHITECTURE.md` §14 for the full rationale.
 
 **Multi-file uploads.** The upload form accepts up to `MAX_FILES_PER_BATCH`
 (50) files at once, sharing one set of expiration/downloads/admin-code
-settings, uploaded with limited concurrency. Each file still gets its own
-independent share link and token — this is a batch of individual links,
-not one link covering multiple files. (A single link that unlocks several
-files together would need a schema change — a "crate contains many files"
-concept — that this version doesn't implement; ask if that's actually what
-you want instead.)
+settings, uploaded with limited concurrency. By default each file gets its
+own independent share link — a batch of individual links, not one link
+covering multiple files (a genuine "crate contains many files" schema
+concept would be needed for that, and this version doesn't implement it).
 
-## 7. Cookie consent & link persistence
+Checking **"Bundle as one .zip"** (shown once 2+ files are queued) sidesteps
+that limitation for the common case: the browser compresses all selected
+files into a single ZIP, streamed straight into the compressor a chunk at
+a time (`lib/zip.ts`, via `fflate`'s streaming API — never holding a whole
+file's raw bytes and its compressed copy in memory at once, which matters
+at the multi-GB sizes an admin code allows), and that one ZIP then goes
+through the exact same single-file pipeline as anything else. One link,
+one file server-side, no schema change. Compression genuinely shrinks
+text/uncompressed data; it won't do much for already-compressed formats
+like photos or video, which the checkbox's own helper text says plainly
+rather than overpromising "saves space" for every file type.
+
+## 7. File stats
+
+Both the uploader's result card and the recipient's `/f/[token]` page have
+a small "Stats" toggle that fetches `GET /api/stats/[token]` on demand and
+shows download count, downloads remaining, when the file was created, and
+when it expires. This isn't a new privilege — anyone with the token can
+already see the file's name and size on the download page, and the stats
+endpoint applies the exact same validity check as everything else
+(`lookupActiveFile`), so an expired or unknown token gets the same generic
+"not found" there too. It's a separate small endpoint rather than baked
+into the page load specifically so the numbers can be refreshed on demand
+(download count changes as other people use the link) without a full page
+reload.
+
+## 8. Cookie consent & link persistence
 
 The only client-side persistence this app does is remembering the visitor's
 most recent upload result(s) so switching tabs or an accidental refresh
@@ -162,7 +186,7 @@ benefit here, since nothing server-side needs to read this state. A banner
 written; declining just means results don't survive a refresh, with no
 other functional change.
 
-## 8. Known limitations
+## 9. Known limitations
 
 - The upload rate limiter is in-memory per serverless instance (see
   `lib/ratelimit.ts`) — a reasonable speed bump for a personal tool, not a
@@ -183,10 +207,20 @@ other functional change.
   general strike system — a wrong code is a strike like any other
   violation, capped at `STRIKE_THRESHOLD` attempts before a ban, on top of
   the code itself rotating every 30 seconds.
-- Multi-file uploads produce one independent link per file, not one link
-  for the whole batch — see §6.
+- Multi-file uploads produce one independent link per file unless "Bundle
+  as one .zip" is checked — see §6.
+- ZIP bundling runs entirely in the browser; on lower-end devices or very
+  large batches, compression takes real time and the tab does the work
+  (off the main thread via a Web Worker, but still local CPU/memory) —
+  there's no server-side fallback by design, since that would mean
+  proxying file bytes through the Vercel function again, exactly what the
+  direct-to-storage architecture exists to avoid (see `ARCHITECTURE.md` §2).
+- The stats endpoint (§7) reveals download count to anyone with the share
+  token — the same trust boundary as the download page itself, not a new
+  exposure, but worth knowing if you'd rather a recipient not see how many
+  times a link has been used.
 
-## 9. Security assumptions
+## 10. Security assumptions
 
 - The service-role key and `CRON_SECRET` are kept out of version control
   and out of the browser bundle; anyone who obtains either has full control
