@@ -1,4 +1,4 @@
-# Droplink
+# Crate Link
 
 Temporary (or permanent-on-request) file sharing for personal use. Upload a
 file, get a short-lived link + QR code, share it. See `ARCHITECTURE.md` for
@@ -87,7 +87,7 @@ empty table and are safe to run against a project with real data in it.
    ones out of the client bundle automatically based on the
    `NEXT_PUBLIC_` prefix convention Next.js uses at build time). Set
    `NEXT_PUBLIC_SITE_URL` to your production URL (e.g.
-   `https://filelink.vercel.app`).
+   `https://cratelink.vercel.app`).
 3. Deploy. `vercel.json` already declares the cleanup cron job.
 4. **Cron frequency note:** Vercel's Hobby plan only allows daily cron
    triggers; `vercel.json` is set to run once a day

@@ -1,4 +1,4 @@
-# Droplink — Architecture
+# Crate Link — Architecture
 
 Personal, temporary (or permanent-on-request) file sharing. Upload a file,
 get a short-lived link + QR code, share it; it stops working when it expires,

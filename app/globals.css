@@ -1,26 +1,114 @@
 @import "tailwindcss";
 
+/*
+  Crate Link visual system.
+  Grounded in the shipping-crate / claim-ticket metaphor implied by the
+  name: red stencil ink on paper stock, a perforated tear-line between the
+  "stub" (wordmark) and the ticket body, and a single glass panel standing
+  in for a frosted plastic label sleeve. Red is used as flat ink (borders,
+  text, one stamp) — never as a gradient wash.
+*/
+
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --paper: #ffffff;
+  --paper-warm: #fbf5f2;
+  --crate-red: #c4272d;
+  --crate-red-deep: #7a1519;
+  --ink: #1c1a19;
+  --ink-soft: #6b6360;
+  --line: #e6ddd7;
 }
 
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+  --color-paper: var(--paper);
+  --color-paper-warm: var(--paper-warm);
+  --color-crate-red: var(--crate-red);
+  --color-crate-red-deep: var(--crate-red-deep);
+  --color-ink: var(--ink);
+  --color-ink-soft: var(--ink-soft);
+  --color-line: var(--line);
+  --font-display: var(--font-display);
+  --font-body: var(--font-body);
+  --font-data: var(--font-data);
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background: var(--paper-warm);
+  color: var(--ink);
+  font-family: var(--font-body), sans-serif;
+  background-image:
+    radial-gradient(ellipse 900px 500px at 50% -10%, rgba(196, 39, 45, 0.09), transparent 60%),
+    radial-gradient(circle, rgba(28, 26, 25, 0.07) 1px, transparent 1px);
+  background-size:
+    100% 100%,
+    22px 22px;
+  background-position:
+    0 0,
+    0 0;
+}
+
+::selection {
+  background: var(--crate-red);
+  color: var(--paper);
+}
+
+:focus-visible {
+  outline: 2px solid var(--crate-red);
+  outline-offset: 2px;
+}
+
+.font-display {
+  font-family: var(--font-display), sans-serif;
+  letter-spacing: 0.02em;
+}
+
+.font-data {
+  font-family: var(--font-data), monospace;
+}
+
+/* The frosted glass ticket panel — the one place in the UI depth is real,
+   not decorative. */
+.glass-panel {
+  background: rgba(255, 255, 255, 0.62);
+  backdrop-filter: blur(20px) saturate(140%);
+  -webkit-backdrop-filter: blur(20px) saturate(140%);
+  border: 1px solid rgba(196, 39, 45, 0.16);
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.6) inset,
+    0 24px 48px -24px rgba(122, 21, 25, 0.35);
+}
+
+/* Perforated tear-line between the stub and the ticket body, like a real
+   claim-check. Drawn as a dashed rule with punched dots, not a plain hr. */
+.tear-line {
+  position: relative;
+  height: 0;
+  border-top: 2px dashed rgba(28, 26, 25, 0.18);
+}
+
+.tear-line::before,
+.tear-line::after {
+  content: "";
+  position: absolute;
+  top: -7px;
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  background: var(--paper-warm);
+  border: 1px solid rgba(28, 26, 25, 0.12);
+}
+
+.tear-line::before {
+  left: -7px;
+}
+
+.tear-line::after {
+  right: -7px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.001ms !important;
+    transition-duration: 0.001ms !important;
+  }
 }

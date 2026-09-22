@@ -44,13 +44,17 @@ export function CountdownTimer({
   }, [expiresAt, isPermanent, onExpire]);
 
   if (isPermanent) {
-    return <p className="text-sm text-emerald-500">Kept permanently</p>;
+    return <p className="text-sm font-data text-[var(--crate-red)]">Kept permanently</p>;
   }
 
   if (remaining === null) return null;
 
   return (
-    <p className={`text-sm ${remaining <= 0 ? "text-red-500" : "text-neutral-400"}`}>
+    <p
+      className={`text-sm font-data ${
+        remaining <= 0 ? "text-[var(--crate-red)]" : "text-[var(--ink-soft)]"
+      }`}
+    >
       {remaining <= 0 ? "Expired" : `Expires in ${formatRemaining(remaining)}`}
     </p>
   );

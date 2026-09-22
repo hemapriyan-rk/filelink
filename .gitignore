@@ -37,6 +37,9 @@ yarn-error.log*
 # stray local notes
 "supabase cred.txt"
 
+# local Claude Code tooling state
+.claude/
+
 # vercel
 .vercel
 

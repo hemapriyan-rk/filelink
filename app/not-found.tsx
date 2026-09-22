@@ -1,6 +1,6 @@
 import Link from "next/link";
 
-export default function TokenNotFound() {
+export default function NotFound() {
   return (
     <main className="flex-1 flex items-center justify-center px-4 py-10 sm:py-16">
       <div className="w-full max-w-md">
@@ -12,16 +12,15 @@ export default function TokenNotFound() {
           </div>
           <div className="tear-line mx-8" />
           <div className="px-6 sm:px-8 py-10 text-center">
-            <p className="font-display text-2xl text-[var(--crate-red)]">LINK EXPIRED</p>
+            <p className="font-display text-2xl text-[var(--crate-red)]">PAGE UNAVAILABLE</p>
             <p className="text-sm text-[var(--ink-soft)] mt-2">
-              This file is no longer available. It may have expired, hit its download limit, or
-              never existed.
+              There&apos;s nothing at this address.
             </p>
             <Link
               href="/"
               className="inline-block mt-6 text-sm font-medium text-[var(--crate-red)] underline"
             >
-              Send your own file
+              Go to Crate Link
             </Link>
           </div>
         </div>

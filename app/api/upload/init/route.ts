@@ -5,9 +5,10 @@ import { sanitizeFilename, sanitizeMimeType } from "@/lib/sanitize";
 import { checkRateLimit, clientIpFrom } from "@/lib/ratelimit";
 import { serverEnv } from "@/lib/env";
 import {
-  ALLOWED_EXPIRATIONS_MINUTES,
   ALLOWED_MAX_DOWNLOADS,
+  MAX_EXPIRATION_MINUTES,
   MAX_FILE_SIZE_BYTES,
+  MIN_EXPIRATION_MINUTES,
   STORAGE_BUCKET,
 } from "@/lib/constants";
 
@@ -44,9 +45,15 @@ export async function POST(req: NextRequest) {
   }
   if (
     typeof expiresMinutes !== "number" ||
-    !ALLOWED_EXPIRATIONS_MINUTES.includes(expiresMinutes as (typeof ALLOWED_EXPIRATIONS_MINUTES)[number])
+    !Number.isFinite(expiresMinutes) ||
+    !Number.isInteger(expiresMinutes) ||
+    expiresMinutes < MIN_EXPIRATION_MINUTES ||
+    expiresMinutes > MAX_EXPIRATION_MINUTES
   ) {
-    return NextResponse.json({ error: "Invalid expiration." }, { status: 400 });
+    return NextResponse.json(
+      { error: `Expiration must be between ${MIN_EXPIRATION_MINUTES} minute and 30 days.` },
+      { status: 400 }
+    );
   }
   let normalizedMaxDownloads: number | null = null;
   if (maxDownloads !== null && maxDownloads !== undefined) {

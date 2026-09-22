@@ -1,29 +1,41 @@
 import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
+import { Bebas_Neue, IBM_Plex_Mono, IBM_Plex_Sans } from "next/font/google";
 import "./globals.css";
+import { Footer } from "@/components/Footer";
 
-const geistSans = Geist({
-  variable: "--font-geist-sans",
+const displayFont = Bebas_Neue({
+  variable: "--font-display",
+  weight: "400",
   subsets: ["latin"],
 });
 
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
+const bodyFont = IBM_Plex_Sans({
+  variable: "--font-body",
+  weight: ["400", "500", "600"],
+  subsets: ["latin"],
+});
+
+const dataFont = IBM_Plex_Mono({
+  variable: "--font-data",
+  weight: ["400", "500"],
   subsets: ["latin"],
 });
 
 export const metadata: Metadata = {
-  title: "Droplink",
-  description: "Temporary file transfer",
+  title: "Crate Link",
+  description: "Send a file, get a link. It expires on its own.",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
     <html
       lang="en"
-      className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
+      className={`${displayFont.variable} ${bodyFont.variable} ${dataFont.variable} h-full antialiased`}
     >
-      <body className="min-h-full flex flex-col bg-neutral-950 text-neutral-100">{children}</body>
+      <body className="min-h-full flex flex-col">
+        <div className="flex-1 flex flex-col">{children}</div>
+        <Footer />
+      </body>
     </html>
   );
 }

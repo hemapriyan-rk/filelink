@@ -7,12 +7,23 @@ import {
   ALLOWED_EXPIRATIONS_MINUTES,
   ALLOWED_MAX_DOWNLOADS,
   EXPIRATION_LABELS,
+  MAX_EXPIRATION_MINUTES,
   MAX_FILE_SIZE_BYTES,
+  MIN_EXPIRATION_MINUTES,
   STORAGE_BUCKET,
 } from "@/lib/constants";
 import { CountdownTimer } from "./CountdownTimer";
 
 type Stage = "idle" | "uploading" | "ready" | "error";
+const CUSTOM = "custom" as const;
+
+type CustomUnit = "minutes" | "hours" | "days";
+
+const UNIT_MINUTES: Record<CustomUnit, number> = {
+  minutes: 1,
+  hours: 60,
+  days: 1440,
+};
 
 interface ReadyResult {
   shareUrl: string;
@@ -36,7 +47,9 @@ function formatBytes(bytes: number): string {
 
 export function UploadForm() {
   const [file, setFile] = useState<File | null>(null);
-  const [expiresMinutes, setExpiresMinutes] = useState<number>(ALLOWED_EXPIRATIONS_MINUTES[1]);
+  const [expirationChoice, setExpirationChoice] = useState<string>(String(ALLOWED_EXPIRATIONS_MINUTES[1]));
+  const [customAmount, setCustomAmount] = useState<number>(2);
+  const [customUnit, setCustomUnit] = useState<CustomUnit>("hours");
   const [maxDownloads, setMaxDownloads] = useState<number | "">("");
   const [stage, setStage] = useState<Stage>("idle");
   const [error, setError] = useState<string | null>(null);
@@ -56,8 +69,22 @@ export function UploadForm() {
     setFile(f);
   }, []);
 
+  function resolveExpiresMinutes(): number | null {
+    if (expirationChoice !== CUSTOM) return Number(expirationChoice);
+    const raw = Math.round(customAmount * UNIT_MINUTES[customUnit]);
+    if (!Number.isFinite(raw) || raw < MIN_EXPIRATION_MINUTES) return null;
+    return Math.min(raw, MAX_EXPIRATION_MINUTES);
+  }
+
   async function handleUpload() {
     if (!file) return;
+    const expiresMinutes = resolveExpiresMinutes();
+    if (expiresMinutes === null) {
+      setError("Enter a valid custom expiration.");
+      setStage("error");
+      return;
+    }
+
     setStage("uploading");
     setError(null);
 
@@ -153,7 +180,7 @@ export function UploadForm() {
     if (!qrDataUrl) return;
     const a = document.createElement("a");
     a.href = qrDataUrl;
-    a.download = "droplink-qr.png";
+    a.download = "cratelink-qr.png";
     a.click();
   }
 
@@ -167,59 +194,55 @@ export function UploadForm() {
 
   if (stage === "ready" && result) {
     return (
-      <div className="w-full max-w-sm flex flex-col items-center gap-4 text-center">
-        <p className="text-sm text-neutral-400">File Ready</p>
+      <div className="flex flex-col items-center gap-5 text-center">
+        <p className="font-display text-2xl text-[var(--crate-red)]">PARCEL READY</p>
         <p className="font-medium break-all">{result.filename}</p>
         <CountdownTimer expiresAt={result.expiresAt} isPermanent={result.isPermanent} />
 
         {qrDataUrl && (
-          // eslint-disable-next-line @next/next/no-img-element
-          <img
-            src={qrDataUrl}
-            alt="QR code linking to the share URL"
-            width={220}
-            height={220}
-            className="rounded-lg bg-white p-2"
-          />
+          <div className="rounded-lg bg-white p-3 border border-[var(--line)] shadow-sm">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src={qrDataUrl} alt="QR code linking to the share URL" width={200} height={200} />
+          </div>
         )}
 
-        <p className="text-xs text-neutral-400 break-all">{result.shareUrl}</p>
+        <p className="font-data text-xs text-[var(--ink-soft)] break-all px-2">{result.shareUrl}</p>
 
-        <div className="flex flex-col gap-2 w-full">
+        <div className="flex flex-col gap-2.5 w-full">
           <button
             onClick={handleCopyLink}
-            className="w-full rounded-md bg-neutral-800 py-2 text-sm hover:bg-neutral-700 transition"
+            className="w-full rounded-md border border-[var(--crate-red)] text-[var(--crate-red)] py-2.5 text-sm font-medium hover:bg-[var(--crate-red)] hover:text-white transition-colors"
           >
-            {copied ? "Copied!" : "Copy Link"}
+            {copied ? "Copied!" : "Copy link"}
           </button>
           <button
             onClick={handleDownloadQr}
-            className="w-full rounded-md bg-neutral-800 py-2 text-sm hover:bg-neutral-700 transition"
+            className="w-full rounded-md border border-[var(--crate-red)] text-[var(--crate-red)] py-2.5 text-sm font-medium hover:bg-[var(--crate-red)] hover:text-white transition-colors"
           >
-            Download QR
+            Save QR code
           </button>
           {!result.isPermanent && (
             <button
               onClick={handleKeepPermanently}
               disabled={promoting}
-              className="w-full rounded-md bg-emerald-700 py-2 text-sm hover:bg-emerald-600 transition disabled:opacity-50"
+              className="w-full rounded-md bg-[var(--crate-red)] text-white py-2.5 text-sm font-medium hover:bg-[var(--crate-red-deep)] transition-colors disabled:opacity-50"
             >
-              {promoting ? "Saving…" : "Keep Permanently"}
+              {promoting ? "Saving…" : "Keep permanently"}
             </button>
           )}
         </div>
 
-        {error && <p className="text-sm text-red-500">{error}</p>}
+        {error && <p className="text-sm text-[var(--crate-red)]">{error}</p>}
 
-        <button onClick={reset} className="text-xs text-neutral-500 underline mt-2">
-          Share another file
+        <button onClick={reset} className="text-xs text-[var(--ink-soft)] underline mt-1">
+          Send another file
         </button>
       </div>
     );
   }
 
   return (
-    <div className="w-full max-w-sm flex flex-col items-center gap-5">
+    <div className="flex flex-col gap-6">
       <div
         onDragOver={(e) => {
           e.preventDefault();
@@ -232,8 +255,10 @@ export function UploadForm() {
           pickFile(e.dataTransfer.files?.[0] ?? null);
         }}
         onClick={() => fileInputRef.current?.click()}
-        className={`w-full h-44 rounded-xl border-2 border-dashed flex flex-col items-center justify-center cursor-pointer transition text-center px-4 ${
-          dragActive ? "border-neutral-300 bg-neutral-900" : "border-neutral-700"
+        className={`h-40 sm:h-44 rounded-xl border-2 border-dashed flex flex-col items-center justify-center cursor-pointer transition-colors text-center px-4 ${
+          dragActive
+            ? "border-[var(--crate-red)] bg-[var(--crate-red)]/5"
+            : "border-[var(--ink)]/25 hover:border-[var(--crate-red)]/50"
         }`}
       >
         <input
@@ -245,38 +270,62 @@ export function UploadForm() {
         {file ? (
           <>
             <p className="font-medium break-all">{file.name}</p>
-            <p className="text-sm text-neutral-400">{formatBytes(file.size)}</p>
+            <p className="text-sm text-[var(--ink-soft)] font-data">{formatBytes(file.size)}</p>
           </>
         ) : (
           <>
-            <p>Drop file here</p>
-            <p className="text-sm text-neutral-400">or Browse</p>
+            <p className="font-medium">Drop a file here</p>
+            <p className="text-sm text-[var(--ink-soft)]">or tap to browse</p>
           </>
         )}
       </div>
 
-      <div className="w-full flex flex-col gap-3">
-        <label className="flex items-center justify-between text-sm">
-          Expiration
+      <div className="flex flex-col gap-4">
+        <div>
+          <div className="flex items-center justify-between text-sm mb-1.5">
+            <span>Expires</span>
+          </div>
           <select
-            value={expiresMinutes}
-            onChange={(e) => setExpiresMinutes(Number(e.target.value))}
-            className="bg-neutral-800 rounded-md px-3 py-1.5"
+            value={expirationChoice}
+            onChange={(e) => setExpirationChoice(e.target.value)}
+            className="w-full bg-white border border-[var(--line)] rounded-md px-3 py-2 text-sm"
           >
             {ALLOWED_EXPIRATIONS_MINUTES.map((m) => (
               <option key={m} value={m}>
                 {EXPIRATION_LABELS[m]}
               </option>
             ))}
+            <option value={CUSTOM}>Custom…</option>
           </select>
-        </label>
 
-        <label className="flex items-center justify-between text-sm">
-          Downloads
+          {expirationChoice === CUSTOM && (
+            <div className="mt-2 flex gap-2">
+              <input
+                type="number"
+                min={1}
+                value={customAmount}
+                onChange={(e) => setCustomAmount(Number(e.target.value))}
+                className="w-20 bg-white border border-[var(--line)] rounded-md px-3 py-2 text-sm font-data"
+              />
+              <select
+                value={customUnit}
+                onChange={(e) => setCustomUnit(e.target.value as CustomUnit)}
+                className="flex-1 bg-white border border-[var(--line)] rounded-md px-3 py-2 text-sm"
+              >
+                <option value="minutes">Minutes</option>
+                <option value="hours">Hours</option>
+                <option value="days">Days</option>
+              </select>
+            </div>
+          )}
+        </div>
+
+        <div>
+          <div className="text-sm mb-1.5">Downloads</div>
           <select
             value={maxDownloads}
             onChange={(e) => setMaxDownloads(e.target.value === "" ? "" : Number(e.target.value))}
-            className="bg-neutral-800 rounded-md px-3 py-1.5"
+            className="w-full bg-white border border-[var(--line)] rounded-md px-3 py-2 text-sm"
           >
             <option value="">Unlimited</option>
             {ALLOWED_MAX_DOWNLOADS.map((n) => (
@@ -285,17 +334,17 @@ export function UploadForm() {
               </option>
             ))}
           </select>
-        </label>
+        </div>
       </div>
 
-      {error && <p className="text-sm text-red-500 text-center">{error}</p>}
+      {error && <p className="text-sm text-[var(--crate-red)] text-center">{error}</p>}
 
       <button
         onClick={handleUpload}
         disabled={!file || stage === "uploading"}
-        className="w-full rounded-md bg-white text-black font-medium py-2.5 disabled:opacity-40 disabled:cursor-not-allowed hover:bg-neutral-200 transition"
+        className="w-full rounded-md bg-[var(--crate-red)] text-white font-medium py-3 disabled:opacity-40 disabled:cursor-not-allowed hover:bg-[var(--crate-red-deep)] transition-colors"
       >
-        {stage === "uploading" ? "Uploading…" : "Upload"}
+        {stage === "uploading" ? "Shipping…" : "Ship it"}
       </button>
     </div>
   );

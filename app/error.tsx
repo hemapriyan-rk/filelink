@@ -1,6 +1,18 @@
-import Link from "next/link";
+"use client";
 
-export default function TokenNotFound() {
+import { useEffect } from "react";
+
+export default function GlobalError({
+  error,
+  reset,
+}: {
+  error: Error & { digest?: string };
+  reset: () => void;
+}) {
+  useEffect(() => {
+    console.error(error);
+  }, [error]);
+
   return (
     <main className="flex-1 flex items-center justify-center px-4 py-10 sm:py-16">
       <div className="w-full max-w-md">
@@ -12,17 +24,16 @@ export default function TokenNotFound() {
           </div>
           <div className="tear-line mx-8" />
           <div className="px-6 sm:px-8 py-10 text-center">
-            <p className="font-display text-2xl text-[var(--crate-red)]">LINK EXPIRED</p>
+            <p className="font-display text-2xl text-[var(--crate-red)]">PAGE UNAVAILABLE</p>
             <p className="text-sm text-[var(--ink-soft)] mt-2">
-              This file is no longer available. It may have expired, hit its download limit, or
-              never existed.
+              Something went wrong on our end. Nothing you did caused this.
             </p>
-            <Link
-              href="/"
-              className="inline-block mt-6 text-sm font-medium text-[var(--crate-red)] underline"
+            <button
+              onClick={reset}
+              className="mt-6 rounded-md bg-[var(--crate-red)] text-white font-medium px-6 py-2.5 text-sm hover:bg-[var(--crate-red-deep)] transition-colors"
             >
-              Send your own file
-            </Link>
+              Try again
+            </button>
           </div>
         </div>
       </div>

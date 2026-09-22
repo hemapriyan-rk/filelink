@@ -77,7 +77,7 @@ async function sweepUntilCaught(fileId: string, attempts = 5): Promise<void> {
   }
 }
 
-describe.skipIf(!hasEnv)("Droplink lifecycle (live Supabase)", () => {
+describe.skipIf(!hasEnv)("Crate Link lifecycle (live Supabase)", () => {
   afterAll(async () => {
     const admin = getSupabaseAdmin();
     if (createdPaths.length) await admin.storage.from(STORAGE_BUCKET).remove(createdPaths);

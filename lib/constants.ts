@@ -6,6 +6,10 @@ export const STORAGE_BUCKET = "droplink";
 
 export const MAX_FILE_SIZE_BYTES = 500 * 1024 * 1024; // 500 MB
 
+// Quick-select presets shown in the UI. The server does not require an
+// exact match against this list — it validates against MIN/MAX below —
+// these are just convenient shortcuts, with "Custom" covering everything
+// else in between.
 export const ALLOWED_EXPIRATIONS_MINUTES = [10, 60, 360, 1440, 4320, 10080] as const;
 
 export const EXPIRATION_LABELS: Record<number, string> = {
@@ -16,6 +20,9 @@ export const EXPIRATION_LABELS: Record<number, string> = {
   4320: "3 days",
   10080: "7 days",
 };
+
+export const MIN_EXPIRATION_MINUTES = 1;
+export const MAX_EXPIRATION_MINUTES = 30 * 24 * 60; // 30 days
 
 export const ALLOWED_MAX_DOWNLOADS = [1, 5, 10] as const;
 
