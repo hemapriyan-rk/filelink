@@ -34,29 +34,31 @@ export default async function DownloadPage({
   }
 
   return (
-    <main className="flex-1 flex items-center justify-center px-4 py-10 sm:py-16">
-      <div className="w-full max-w-md">
+    <main className="min-h-svh flex items-center justify-center px-4 py-8">
+      <div className="w-full max-w-xl">
         <div className="glass-panel rounded-2xl overflow-hidden">
-          <div className="px-6 sm:px-8 pt-8 pb-6 text-center">
-            <p className="font-display text-3xl tracking-wide">
+          <div className="px-8 sm:px-12 pt-8 pb-5 text-center">
+            <p className="font-display text-4xl tracking-wide">
               <span className="text-[var(--crate-red)]">CRATE</span> LINK
             </p>
           </div>
 
-          <div className="tear-line mx-8" />
+          <div className="tear-line mx-10" />
 
-          <div className="px-6 sm:px-8 py-8">
-            <div className="text-center mb-6">
+          <div className="px-8 sm:px-12 py-10">
+            <div className="text-center mb-6 max-w-xs mx-auto">
               <p className="font-medium break-all">{file.original_filename}</p>
               <p className="text-sm text-[var(--ink-soft)] font-data">
                 {formatBytes(file.size_bytes)}
               </p>
             </div>
-            <DownloadPanel
-              token={token}
-              expiresAt={file.expires_at}
-              isPermanent={file.is_permanent}
-            />
+            <div className="max-w-xs mx-auto">
+              <DownloadPanel
+                token={token}
+                expiresAt={file.expires_at}
+                isPermanent={file.is_permanent}
+              />
+            </div>
           </div>
         </div>
       </div>

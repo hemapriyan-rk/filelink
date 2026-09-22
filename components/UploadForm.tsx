@@ -194,7 +194,7 @@ export function UploadForm() {
 
   if (stage === "ready" && result) {
     return (
-      <div className="flex flex-col items-center gap-5 text-center">
+      <div className="flex flex-col items-center gap-5 text-center max-w-xs mx-auto">
         <p className="font-display text-2xl text-[var(--crate-red)]">PARCEL READY</p>
         <p className="font-medium break-all">{result.filename}</p>
         <CountdownTimer expiresAt={result.expiresAt} isPermanent={result.isPermanent} />
@@ -242,7 +242,7 @@ export function UploadForm() {
   }
 
   return (
-    <div className="flex flex-col gap-6">
+    <div className="flex flex-col gap-5">
       <div
         onDragOver={(e) => {
           e.preventDefault();
@@ -255,7 +255,7 @@ export function UploadForm() {
           pickFile(e.dataTransfer.files?.[0] ?? null);
         }}
         onClick={() => fileInputRef.current?.click()}
-        className={`h-40 sm:h-44 rounded-xl border-2 border-dashed flex flex-col items-center justify-center cursor-pointer transition-colors text-center px-4 ${
+        className={`h-36 sm:h-40 rounded-xl border-2 border-dashed flex flex-col items-center justify-center cursor-pointer transition-colors text-center px-4 ${
           dragActive
             ? "border-[var(--crate-red)] bg-[var(--crate-red)]/5"
             : "border-[var(--ink)]/25 hover:border-[var(--crate-red)]/50"
