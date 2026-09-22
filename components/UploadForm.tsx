@@ -7,20 +7,28 @@ import {
   ALLOWED_EXPIRATIONS_MINUTES,
   ALLOWED_MAX_DOWNLOADS,
   EXPIRATION_LABELS,
+  MAX_DOWNLOADS_LIMIT,
   MAX_FILES_PER_BATCH,
   MAX_FILE_SIZE_BYTES,
+  MIN_DOWNLOADS_LIMIT,
   MIN_EXPIRATION_MINUTES,
+  NEAR_FULL_EXPIRATION_MINUTES,
   STORAGE_BUCKET,
 } from "@/lib/constants";
 import { hasConsent } from "@/lib/consent";
 import { zipFiles } from "@/lib/zip";
+import { addToHistory } from "@/lib/history";
 import { CountdownTimer } from "./CountdownTimer";
 import { StatsToggle } from "./StatsToggle";
 
-type Stage = "idle" | "uploading" | "ready" | "banned";
+type Stage = "idle" | "choosing" | "uploading" | "ready" | "banned";
 const CUSTOM = "custom" as const;
 const CONCURRENCY = 3;
 const SESSION_KEY = "cratelink:lastResults";
+
+interface Capacity {
+  status: "ok" | "near_full" | "full";
+}
 
 type CustomUnit = "minutes" | "hours" | "days";
 
@@ -173,16 +181,39 @@ export function UploadForm() {
   const [expirationChoice, setExpirationChoice] = useState<string>(String(ALLOWED_EXPIRATIONS_MINUTES[1]));
   const [customAmount, setCustomAmount] = useState<number>(2);
   const [customUnit, setCustomUnit] = useState<CustomUnit>("hours");
-  const [maxDownloads, setMaxDownloads] = useState<number | "">("");
+  const [downloadsChoice, setDownloadsChoice] = useState<string>("");
+  const [customDownloads, setCustomDownloads] = useState<number>(20);
   const [showAdminField, setShowAdminField] = useState(false);
   const [adminCode, setAdminCode] = useState("");
-  const [bundleAsZip, setBundleAsZip] = useState(false);
   const [zipProgress, setZipProgress] = useState<number | null>(null);
   const [stage, setStage] = useState<Stage>("idle");
   const [error, setError] = useState<string | null>(null);
   const [bannedUntil, setBannedUntil] = useState<string | null>(null);
+  const [capacity, setCapacity] = useState<Capacity | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [dragActive, setDragActive] = useState(false);
+
+  useEffect(() => {
+    fetch("/api/capacity")
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (data) setCapacity(data);
+      })
+      .catch(() => {
+        // capacity check failing shouldn't block the form — /api/upload/init
+        // enforces the real limit server-side regardless.
+      });
+  }, []);
+
+  useEffect(() => {
+    // capacity arrives asynchronously from /api/capacity, so there's no way
+    // to compute this as initial state — it has to react to the fetch
+    // resolving.
+    if (capacity?.status === "near_full") {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setExpirationChoice(String(NEAR_FULL_EXPIRATION_MINUTES));
+    }
+  }, [capacity]);
 
   // Restore the last batch's results if the visitor consented and it hasn't
   // expired — so switching tabs, or an accidental refresh, doesn't lose a
@@ -265,7 +296,26 @@ export function UploadForm() {
     return raw;
   }
 
-  async function uploadOne(item: QueueItem, expiresMinutes: number): Promise<QueueItem> {
+  /** null = unlimited (valid); undefined = an invalid custom value was entered. */
+  function resolveMaxDownloads(): number | null | undefined {
+    if (downloadsChoice === "") return null;
+    if (downloadsChoice !== CUSTOM) return Number(downloadsChoice);
+    if (
+      !Number.isFinite(customDownloads) ||
+      !Number.isInteger(customDownloads) ||
+      customDownloads < MIN_DOWNLOADS_LIMIT ||
+      customDownloads > MAX_DOWNLOADS_LIMIT
+    ) {
+      return undefined;
+    }
+    return customDownloads;
+  }
+
+  async function uploadOne(
+    item: QueueItem,
+    expiresMinutes: number,
+    maxDownloads: number | null
+  ): Promise<QueueItem> {
     try {
       const initRes = await fetch("/api/upload/init", {
         method: "POST",
@@ -275,7 +325,7 @@ export function UploadForm() {
           mimeType: item.file.type || "application/octet-stream",
           sizeBytes: item.file.size,
           expiresMinutes,
-          maxDownloads: maxDownloads === "" ? null : maxDownloads,
+          maxDownloads,
           adminCode: adminCode.trim() || undefined,
         }),
       });
@@ -335,7 +385,17 @@ export function UploadForm() {
     }
   }
 
-  async function handleZipUpload(expiresMinutes: number) {
+  function saveResults(results: FileResult[]) {
+    if (!hasConsent() || results.length === 0) return;
+    try {
+      sessionStorage.setItem(SESSION_KEY, JSON.stringify(results));
+    } catch {
+      // storage unavailable — non-fatal
+    }
+    addToHistory(results.map((r) => ({ ...r, createdAt: new Date().toISOString() })));
+  }
+
+  async function handleZipUpload(expiresMinutes: number, maxDownloads: number | null) {
     setZipProgress(0);
     let zipBlob: Blob;
     try {
@@ -358,7 +418,7 @@ export function UploadForm() {
 
     let done: QueueItem;
     try {
-      done = await uploadOne(zipItem, expiresMinutes);
+      done = await uploadOne(zipItem, expiresMinutes, maxDownloads);
     } catch (err) {
       const banned = (err as { bannedUntil?: string }).bannedUntil ?? null;
       setBannedUntil(banned);
@@ -367,30 +427,26 @@ export function UploadForm() {
     }
     setQueue([done]);
 
-    if (done.status === "done" && done.result && hasConsent()) {
-      try {
-        sessionStorage.setItem(SESSION_KEY, JSON.stringify([done.result]));
-      } catch {
-        // storage unavailable — non-fatal
-      }
-    }
+    if (done.status === "done" && done.result) saveResults([done.result]);
     setStage("ready");
   }
 
-  async function handleUpload() {
-    if (queue.length === 0) return;
-    const resolved = resolveExpiresMinutes();
-    if (resolved === null) {
-      setError("Enter a valid custom expiration.");
+  async function proceedUpload(asZip: boolean) {
+    const resolvedExpires = resolveExpiresMinutes();
+    const resolvedDownloads = resolveMaxDownloads();
+    if (resolvedExpires === null || resolvedDownloads === undefined) {
+      // Already validated in handleUpload before reaching "choosing"; this
+      // is just type narrowing back to non-null for TypeScript.
+      setStage("idle");
       return;
     }
-    const expiresMinutes: number = resolved;
+    const expiresMinutes: number = resolvedExpires;
+    const maxDownloads: number | null = resolvedDownloads;
 
-    setError(null);
     setStage("uploading");
 
-    if (bundleAsZip && queue.length > 1) {
-      await handleZipUpload(expiresMinutes);
+    if (asZip) {
+      await handleZipUpload(expiresMinutes, maxDownloads);
       return;
     }
 
@@ -405,7 +461,7 @@ export function UploadForm() {
       while (cursor < pending.length && !hitBan) {
         const idx = cursor++;
         try {
-          const done = await uploadOne(pending[idx], expiresMinutes);
+          const done = await uploadOne(pending[idx], expiresMinutes, maxDownloads);
           results[idx] = done;
           setQueue((prev) => prev.map((q) => (q.id === done.id ? done : q)));
         } catch (err) {
@@ -422,25 +478,35 @@ export function UploadForm() {
     if (hitBan) return;
 
     const finalResults = results.filter((r): r is QueueItem => !!r && r.status === "done");
-    if (hasConsent() && finalResults.length > 0) {
-      try {
-        sessionStorage.setItem(
-          SESSION_KEY,
-          JSON.stringify(finalResults.map((r) => r.result))
-        );
-      } catch {
-        // storage unavailable — non-fatal
-      }
-    }
+    saveResults(finalResults.map((r) => r.result!));
 
     setStage("ready");
+  }
+
+  function handleUpload() {
+    if (queue.length === 0) return;
+    if (resolveExpiresMinutes() === null) {
+      setError("Enter a valid custom expiration.");
+      return;
+    }
+    if (resolveMaxDownloads() === undefined) {
+      setError("Enter a valid custom download limit.");
+      return;
+    }
+    setError(null);
+
+    if (queue.length > 1) {
+      setStage("choosing");
+      return;
+    }
+
+    proceedUpload(false);
   }
 
   function reset() {
     setQueue([]);
     setStage("idle");
     setError(null);
-    setBundleAsZip(false);
     setZipProgress(null);
     try {
       sessionStorage.removeItem(SESSION_KEY);
@@ -457,6 +523,48 @@ export function UploadForm() {
         <p className="text-sm text-[var(--ink-soft)] mt-2">
           This connection has been temporarily banned for repeated abuse of upload limits.
           {until ? ` You can try again after ${until}.` : ""}
+        </p>
+      </div>
+    );
+  }
+
+  if (stage === "choosing") {
+    return (
+      <div className="text-center py-2 flex flex-col gap-4">
+        <p className="font-display text-2xl text-[var(--crate-red)]">HOW TO SEND?</p>
+        <p className="text-sm text-[var(--ink-soft)]">{queue.length} files selected.</p>
+        <div className="flex flex-col gap-2.5">
+          <button
+            onClick={() => proceedUpload(true)}
+            className="w-full rounded-md bg-[var(--crate-red)] text-white font-medium py-3 hover:bg-[var(--crate-red-deep)] transition-colors"
+          >
+            One QR code (bundle as .zip)
+          </button>
+          <button
+            onClick={() => proceedUpload(false)}
+            className="w-full rounded-md border border-[var(--crate-red)] text-[var(--crate-red)] font-medium py-3 hover:bg-[var(--crate-red)] hover:text-white transition-colors"
+          >
+            Separate links ({queue.length} QR codes)
+          </button>
+        </div>
+        <p className="text-xs text-[var(--ink-soft)]">
+          Bundling compresses everything into one file — great for text, won&apos;t shrink photos
+          or video much, and the recipient has to unzip it.
+        </p>
+        <button onClick={() => setStage("idle")} className="text-xs text-[var(--ink-soft)] underline">
+          Back
+        </button>
+      </div>
+    );
+  }
+
+  if (capacity?.status === "full" && stage === "idle") {
+    return (
+      <div className="text-center py-4">
+        <p className="font-display text-2xl text-[var(--crate-red)]">SERVER FULL</p>
+        <p className="text-sm text-[var(--ink-soft)] mt-2">
+          Crate Link is out of storage space right now. Files expire and get cleaned up
+          automatically over time, freeing up room — please check back in a while.
         </p>
       </div>
     );
@@ -562,83 +670,77 @@ export function UploadForm() {
         </div>
       )}
 
-      {queue.length > 1 && (
+      {zipProgress !== null && (
         <div>
-          <label className="flex items-start gap-2 text-sm cursor-pointer">
-            <input
-              type="checkbox"
-              checked={bundleAsZip}
-              onChange={(e) => setBundleAsZip(e.target.checked)}
-              disabled={uploading}
-              className="mt-0.5"
+          <div className="h-1.5 rounded-full bg-[var(--line)] overflow-hidden">
+            <div
+              className="h-full bg-[var(--crate-red)] transition-all"
+              style={{ width: `${Math.round(zipProgress * 100)}%` }}
             />
-            <span>
-              Bundle as one .zip
-              <span className="block text-xs text-[var(--ink-soft)]">
-                One link instead of {queue.length}. Compression mainly helps for text/uncompressed
-                files — photos and video won&apos;t shrink much.
-              </span>
-            </span>
-          </label>
-          {zipProgress !== null && (
-            <div className="mt-2">
-              <div className="h-1.5 rounded-full bg-[var(--line)] overflow-hidden">
-                <div
-                  className="h-full bg-[var(--crate-red)] transition-all"
-                  style={{ width: `${Math.round(zipProgress * 100)}%` }}
-                />
-              </div>
-              <p className="text-xs text-[var(--ink-soft)] mt-1">
-                Compressing… {Math.round(zipProgress * 100)}%
-              </p>
-            </div>
-          )}
+          </div>
+          <p className="text-xs text-[var(--ink-soft)] mt-1">
+            Compressing… {Math.round(zipProgress * 100)}%
+          </p>
         </div>
       )}
 
       <div className="flex flex-col gap-4">
         <div>
           <div className="text-sm mb-1.5">Expires</div>
-          <select
-            value={expirationChoice}
-            onChange={(e) => setExpirationChoice(e.target.value)}
-            className="w-full bg-white border border-[var(--line)] rounded-md px-3 py-2 text-sm"
-          >
-            {ALLOWED_EXPIRATIONS_MINUTES.map((m) => (
-              <option key={m} value={m}>
-                {EXPIRATION_LABELS[m]}
-              </option>
-            ))}
-            <option value={CUSTOM}>Custom…</option>
-          </select>
-
-          {expirationChoice === CUSTOM && (
-            <div className="mt-2 flex gap-2">
-              <input
-                type="number"
-                min={1}
-                value={customAmount}
-                onChange={(e) => setCustomAmount(Number(e.target.value))}
-                className="w-20 bg-white border border-[var(--line)] rounded-md px-3 py-2 text-sm font-data"
-              />
+          {capacity?.status === "near_full" ? (
+            <>
+              <div className="w-full bg-[var(--line)]/40 border border-[var(--line)] rounded-md px-3 py-2 text-sm text-[var(--ink-soft)]">
+                10 minutes (fixed)
+              </div>
+              <p className="text-xs text-[var(--crate-red)] mt-1.5">
+                We&apos;re low on storage space, so only the shortest expiration is available
+                right now. Check back later for longer durations.
+              </p>
+            </>
+          ) : (
+            <>
               <select
-                value={customUnit}
-                onChange={(e) => setCustomUnit(e.target.value as CustomUnit)}
-                className="flex-1 bg-white border border-[var(--line)] rounded-md px-3 py-2 text-sm"
+                value={expirationChoice}
+                onChange={(e) => setExpirationChoice(e.target.value)}
+                className="w-full bg-white border border-[var(--line)] rounded-md px-3 py-2 text-sm"
               >
-                <option value="minutes">Minutes</option>
-                <option value="hours">Hours</option>
-                <option value="days">Days</option>
+                {ALLOWED_EXPIRATIONS_MINUTES.map((m) => (
+                  <option key={m} value={m}>
+                    {EXPIRATION_LABELS[m]}
+                  </option>
+                ))}
+                <option value={CUSTOM}>Custom…</option>
               </select>
-            </div>
+
+              {expirationChoice === CUSTOM && (
+                <div className="mt-2 flex gap-2">
+                  <input
+                    type="number"
+                    min={1}
+                    value={customAmount}
+                    onChange={(e) => setCustomAmount(Number(e.target.value))}
+                    className="w-20 bg-white border border-[var(--line)] rounded-md px-3 py-2 text-sm font-data"
+                  />
+                  <select
+                    value={customUnit}
+                    onChange={(e) => setCustomUnit(e.target.value as CustomUnit)}
+                    className="flex-1 bg-white border border-[var(--line)] rounded-md px-3 py-2 text-sm"
+                  >
+                    <option value="minutes">Minutes</option>
+                    <option value="hours">Hours</option>
+                    <option value="days">Days</option>
+                  </select>
+                </div>
+              )}
+            </>
           )}
         </div>
 
         <div>
           <div className="text-sm mb-1.5">Downloads</div>
           <select
-            value={maxDownloads}
-            onChange={(e) => setMaxDownloads(e.target.value === "" ? "" : Number(e.target.value))}
+            value={downloadsChoice}
+            onChange={(e) => setDownloadsChoice(e.target.value)}
             className="w-full bg-white border border-[var(--line)] rounded-md px-3 py-2 text-sm"
           >
             <option value="">Unlimited</option>
@@ -647,7 +749,19 @@ export function UploadForm() {
                 {n}
               </option>
             ))}
+            <option value={CUSTOM}>Custom…</option>
           </select>
+
+          {downloadsChoice === CUSTOM && (
+            <input
+              type="number"
+              min={MIN_DOWNLOADS_LIMIT}
+              max={MAX_DOWNLOADS_LIMIT}
+              value={customDownloads}
+              onChange={(e) => setCustomDownloads(Number(e.target.value))}
+              className="mt-2 w-full bg-white border border-[var(--line)] rounded-md px-3 py-2 text-sm font-data"
+            />
+          )}
         </div>
 
         <div>
@@ -690,9 +804,7 @@ export function UploadForm() {
             ? "Compressing…"
             : "Shipping…"
           : queue.length > 1
-            ? bundleAsZip
-              ? "Ship as one .zip"
-              : `Ship ${queue.length} files`
+            ? `Ship ${queue.length} files`
             : "Ship it"}
       </button>
     </div>

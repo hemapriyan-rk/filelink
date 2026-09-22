@@ -29,7 +29,32 @@ export const MAX_EXPIRATION_MINUTES = 30 * 24 * 60; // 30 days — standard cap
 export const MAX_FILE_SIZE_BYTES_ADMIN = 5 * 1024 * 1024 * 1024; // 5 GB
 export const MAX_EXPIRATION_MINUTES_ADMIN = 365 * 24 * 60; // 1 year
 
+// Quick-select presets; "Custom" (like expiration) covers anything else
+// within MIN/MAX_DOWNLOADS_LIMIT below, which the server actually enforces.
 export const ALLOWED_MAX_DOWNLOADS = [1, 5, 10] as const;
+export const MIN_DOWNLOADS_LIMIT = 1;
+export const MAX_DOWNLOADS_LIMIT = 100_000; // effectively "unlimited" but still bounded
+
+// Storage capacity gating. Supabase's free tier storage quota is small
+// (roughly 1 GB at the time of writing) and this app has no way to query
+// it directly via the anon/service-role keys — no Management API token —
+// so instead it tracks the one number it actually controls: the sum of
+// size_bytes across every row this app has ever written that isn't
+// deleted yet. That's an accurate proxy as long as this bucket is only
+// ever written to by this app, which it is. Override via
+// STORAGE_QUOTA_BYTES if your actual plan's quota differs.
+export const DEFAULT_STORAGE_QUOTA_BYTES = 1024 * 1024 * 1024; // 1 GB
+// Above this fraction of quota used: restrict everyone to the shortest
+// expiration (faster turnover, sooner cleanup) and show a disclaimer.
+export const STORAGE_NEAR_FULL_RATIO = 0.85;
+// Above this fraction: reject new uploads outright.
+export const STORAGE_FULL_RATIO = 0.97;
+// The one expiration allowed while near-full.
+export const NEAR_FULL_EXPIRATION_MINUTES = 10;
+// Headroom kept back from an admin-code upload even when there's
+// technically more room than that — never let one admin upload consume
+// every remaining byte.
+export const ADMIN_UPLOAD_SAFETY_MARGIN_BYTES = 50 * 1024 * 1024; // 50 MB
 
 export const SIGNED_DOWNLOAD_URL_TTL_SECONDS = 60;
 

@@ -1,8 +1,9 @@
 import { UploadForm } from "@/components/UploadForm";
+import { RecentLinks } from "@/components/RecentLinks";
 
 export default function Home() {
   return (
-    <main className="min-h-svh flex items-center justify-center px-4 py-8">
+    <main className="min-h-svh flex flex-col items-center justify-center px-4 py-8">
       <div className="w-full max-w-xl">
         <div className="glass-panel rounded-2xl overflow-hidden">
           <div className="px-8 sm:px-12 pt-8 pb-5 text-center">
@@ -22,6 +23,7 @@ export default function Home() {
           </div>
         </div>
       </div>
+      <RecentLinks />
     </main>
   );
 }

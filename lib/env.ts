@@ -31,6 +31,18 @@ export const serverEnv = {
   get adminTotpSecret(): string | null {
     return process.env.ADMIN_TOTP_SECRET || null;
   },
+  /**
+   * Override for DEFAULT_STORAGE_QUOTA_BYTES (lib/constants.ts) — set this
+   * to your actual Supabase plan's storage quota in bytes if it differs
+   * from the 1 GB default. Optional; falls back to the default when unset
+   * or not a valid positive number.
+   */
+  get storageQuotaBytes(): number | null {
+    const raw = process.env.STORAGE_QUOTA_BYTES;
+    if (!raw) return null;
+    const parsed = Number(raw);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+  },
 };
 
 // Safe to import from client components.

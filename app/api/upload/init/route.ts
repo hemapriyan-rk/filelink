@@ -5,18 +5,25 @@ import { sanitizeFilename, sanitizeMimeType } from "@/lib/sanitize";
 import { checkRateLimit, clientIpFrom } from "@/lib/ratelimit";
 import { checkBan, recordStrike } from "@/lib/abuse";
 import { verifyTotp } from "@/lib/totp";
+import { getCapacity } from "@/lib/capacity";
 import { serverEnv } from "@/lib/env";
 import {
-  ALLOWED_MAX_DOWNLOADS,
+  ADMIN_UPLOAD_SAFETY_MARGIN_BYTES,
+  MAX_DOWNLOADS_LIMIT,
   MAX_EXPIRATION_MINUTES,
   MAX_EXPIRATION_MINUTES_ADMIN,
   MAX_FILE_SIZE_BYTES,
   MAX_FILE_SIZE_BYTES_ADMIN,
+  MIN_DOWNLOADS_LIMIT,
   MIN_EXPIRATION_MINUTES,
+  NEAR_FULL_EXPIRATION_MINUTES,
   STORAGE_BUCKET,
 } from "@/lib/constants";
 
 const ABUSE_WARNING = " Repeated attempts to bypass this limit will result in a temporary ban.";
+const NEAR_FULL_MESSAGE =
+  "We're low on storage space right now, so only the 10-minute expiration is available until " +
+  "some room frees up. Please try a longer duration again in a little while.";
 
 function bannedResponse(bannedUntil: string | null) {
   return NextResponse.json(
@@ -46,6 +53,19 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  const capacity = await getCapacity();
+  if (capacity.status === "full") {
+    return NextResponse.json(
+      {
+        error:
+          "Crate Link is out of storage space right now. Files expire and get cleaned up over " +
+          "time, freeing up room — please wait a while and try again.",
+        capacity: capacity.status,
+      },
+      { status: 503 }
+    );
+  }
+
   let body: unknown;
   try {
     body = await req.json();
@@ -72,7 +92,13 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  const maxFileSize = isAdmin ? MAX_FILE_SIZE_BYTES_ADMIN : MAX_FILE_SIZE_BYTES;
+  // Even an admin code can't outrun actual available space — it raises
+  // the ceiling up to what's really left, minus a safety margin, never
+  // past it.
+  const remainingBytes = Math.max(0, capacity.quotaBytes - capacity.usedBytes);
+  const maxFileSize = isAdmin
+    ? Math.max(0, Math.min(MAX_FILE_SIZE_BYTES_ADMIN, remainingBytes - ADMIN_UPLOAD_SAFETY_MARGIN_BYTES))
+    : MAX_FILE_SIZE_BYTES;
   const maxExpiration = isAdmin ? MAX_EXPIRATION_MINUTES_ADMIN : MAX_EXPIRATION_MINUTES;
 
   if (typeof sizeBytes !== "number" || !Number.isFinite(sizeBytes) || sizeBytes <= 0) {
@@ -85,12 +111,19 @@ export async function POST(req: NextRequest) {
     }
     return NextResponse.json(
       {
-        error:
-          `File exceeds the ${Math.floor(maxFileSize / (1024 * 1024))} MB limit.` +
-          (isAdmin ? "" : ABUSE_WARNING),
+        error: isAdmin
+          ? `Not enough storage space left for a file this size (${Math.floor(maxFileSize / (1024 * 1024))} MB available).`
+          : `File exceeds the ${Math.floor(maxFileSize / (1024 * 1024))} MB limit.${ABUSE_WARNING}`,
       },
       { status: 413 }
     );
+  }
+
+  // Near-full: standard uploads are held to the shortest expiration so
+  // whatever's stored turns over faster. This is enforced here, not just
+  // hidden in the UI, since the UI's restriction alone is only advisory.
+  if (!isAdmin && capacity.status === "near_full" && expiresMinutes !== NEAR_FULL_EXPIRATION_MINUTES) {
+    return NextResponse.json({ error: NEAR_FULL_MESSAGE, capacity: capacity.status }, { status: 409 });
   }
 
   if (
@@ -119,9 +152,17 @@ export async function POST(req: NextRequest) {
   if (maxDownloads !== null && maxDownloads !== undefined) {
     if (
       typeof maxDownloads !== "number" ||
-      !ALLOWED_MAX_DOWNLOADS.includes(maxDownloads as (typeof ALLOWED_MAX_DOWNLOADS)[number])
+      !Number.isFinite(maxDownloads) ||
+      !Number.isInteger(maxDownloads) ||
+      maxDownloads < MIN_DOWNLOADS_LIMIT ||
+      maxDownloads > MAX_DOWNLOADS_LIMIT
     ) {
-      return NextResponse.json({ error: "Invalid download limit." }, { status: 400 });
+      return NextResponse.json(
+        {
+          error: `Download limit must be between ${MIN_DOWNLOADS_LIMIT} and ${MAX_DOWNLOADS_LIMIT}.`,
+        },
+        { status: 400 }
+      );
     }
     normalizedMaxDownloads = maxDownloads;
   }

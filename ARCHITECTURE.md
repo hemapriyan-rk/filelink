@@ -370,13 +370,26 @@ Authenticator/Authy exist to make, reused here for exactly one code
 instead of a login system.
 
 **Why the code only ever raises limits, never grants anything else.** A
-valid admin code changes exactly two numbers for that one request —
-`MAX_FILE_SIZE_BYTES_ADMIN` instead of `MAX_FILE_SIZE_BYTES`,
-`MAX_EXPIRATION_MINUTES_ADMIN` instead of `MAX_EXPIRATION_MINUTES` — and
-nothing else. It doesn't bypass sanitization, doesn't disable strikes for
-*other* kinds of abuse (a wrong admin code is itself a strike), and
-doesn't create a session or a cookie. There is no state that "being admin"
-sets beyond the parameters of that one `/api/upload/init` call.
+valid admin code changes exactly two numbers for that one request — the
+allowed file size, up to `MAX_FILE_SIZE_BYTES_ADMIN`, and the allowed
+expiration, up to `MAX_EXPIRATION_MINUTES_ADMIN` — and nothing else. It
+doesn't bypass sanitization, doesn't disable strikes for *other* kinds of
+abuse (a wrong admin code is itself a strike), and doesn't create a
+session or a cookie. There is no state that "being admin" sets beyond the
+parameters of that one `/api/upload/init` call.
+
+**Why the admin file-size ceiling is also clamped to actual remaining
+space.** `MAX_FILE_SIZE_BYTES_ADMIN` (5 GB) is an upper bound, not a
+promise — the real allowed size for an admin-authorized request is
+`min(MAX_FILE_SIZE_BYTES_ADMIN, remainingBytes - ADMIN_UPLOAD_SAFETY_MARGIN_BYTES)`,
+computed fresh from `getCapacity()` (§18) on every request. Without this,
+a single admin-authorized upload could exceed the entire remaining quota
+on a project that's mostly full, defeating the whole point of the
+capacity gate. The 50 MB safety margin exists so an admin upload never
+consumes the literal last byte either — some headroom is kept back
+deliberately. When the bucket is genuinely `full` (§18), even a valid
+admin code is rejected outright, before any size math happens: raising a
+ceiling doesn't help when there's no room left to raise into.
 
 **Why bans live in Postgres, not `lib/ratelimit.ts`.** The existing
 in-memory rate limiter is explicitly documented (see its own file) as a
@@ -425,16 +438,27 @@ existing single-file endpoint is already fully race-safe, tested, and
 simple, and a client-side queue gets the "upload several files" UX without
 touching any of that.
 
-**By default this produces N independent share links, not one link for N
-files.** Bundling several files behind a single shareable link (a "crate
-contains many files" concept) as a *server-side* feature is materially
-different — it needs a new relationship in the schema, a download page
-that lists multiple files instead of showing one, and new semantics for
-what "expired" or "kept permanently" means for a group. That's a real
-feature this version does not build server-side; `MAX_FILES_PER_BATCH`
-(50) instead caps how many independent links a single visit can generate
-in one go, enforced by the existing per-IP rate limit and strike system
-rather than a new one. §16 covers the client-side alternative that covers
+**Why the choice is asked after "Ship", not a checkbox set in advance.**
+With 2+ files queued, pressing "Ship N files" interrupts into a small
+"HOW TO SEND?" screen — "One QR code (bundle as .zip)" or "Separate links
+(N QR codes)" — rather than uploading immediately. This is a UX choice,
+not a technical one: the two paths produce meaningfully different results
+for the recipient (one .zip they have to extract, vs. N plain files), so
+it's presented as a deliberate decision point at the moment of actually
+sending, instead of a pre-configured setting easy to forget was set one
+way or the other.
+
+**By default (separate links) this produces N independent share links,
+not one link for N files.** Bundling several files behind a single
+shareable link as a *server-side* feature — a genuine "crate contains
+many files" schema concept — is materially different: it needs a new
+relationship in the schema, a download page that lists multiple files
+instead of showing one, and new semantics for what "expired" or "kept
+permanently" means for a group. That's a real feature this version does
+not build server-side; `MAX_FILES_PER_BATCH` (50) instead caps how many
+independent links a single visit can generate in one go, enforced by the
+existing per-IP rate limit and strike system rather than a new one. §16
+covers the client-side alternative (the "One QR code" path) that covers
 the common case of this same request without any of that schema work.
 
 ## 16. Client-side ZIP bundling
@@ -500,3 +524,55 @@ so the UI can refresh the numbers on demand (`components/StatsToggle.tsx`,
 used from both the uploader's result card and the recipient's download
 page) without a full page reload — download count changes as other
 people use the link after the page was first loaded.
+
+## 18. Storage capacity gating
+
+**Why this exists at all.** Supabase's free tier gives a small storage
+quota. Without any capacity awareness, this app would simply start
+failing uploads with an opaque Supabase storage error once the bucket
+filled up — no warning, no explanation, just a broken-feeling app right
+when it's been used the most. `lib/capacity.ts` makes running low a
+first-class, visible state instead of a failure mode.
+
+**Why usage is computed from `files`, not asked of Supabase directly.**
+There's no Supabase Management API token available anywhere in this
+app's credential set — only the project's own anon and service-role keys,
+which don't expose bucket-level usage stats. `total_storage_used()`
+(`supabase/migrations/0003_capacity.sql`) instead sums `size_bytes`
+across every non-deleted row. This is exact, not an estimate, as long as
+this bucket is only ever written to by this app — which it is, by
+construction, since every write goes through `/api/upload/init`.
+
+**Why three states (ok / near_full / full) instead of a single boolean.**
+A hard cutoff alone — "full or not" — would mean the app looks completely
+normal right up until it suddenly doesn't. The `near_full` state
+(`STORAGE_NEAR_FULL_RATIO`, 85%) exists to change behavior *before* that
+cliff: locking expiration to the shortest option (`NEAR_FULL_EXPIRATION_MINUTES`,
+10 minutes) is a direct lever on how fast the bucket empties back out
+again, since nothing here deletes itself early — files only leave via
+expiry (§8) or the cleanup sweep (§9). `full` (`STORAGE_FULL_RATIO`, 97%)
+is the actual hard stop, kept just under 100% so the last few requests in
+a race don't get to fight over the literal final bytes.
+
+**Why this is enforced server-side, not just reflected in the UI.** The
+upload form fetches `/api/capacity` and adapts proactively — locking the
+expiration dropdown, or replacing the whole form with a "Server Full"
+message — purely so a visitor finds out *before* filling out the form and
+clicking Ship, not as the actual security boundary. `/api/upload/init`
+independently checks capacity and rejects non-compliant requests (503
+when full, 409 for a non-10-minute expiration while near-full) regardless
+of what the client sends, the same "server is the source of truth, UI is
+just a head start" pattern used everywhere else abuse-adjacent in this
+app (§14).
+
+**Why this is a soft, best-effort check, not an atomic reservation.**
+Capacity is read once at the start of handling a request, and the actual
+insert happens afterward with no lock held across that gap. Two uploads
+racing right at the `full` boundary could theoretically both be admitted,
+pushing usage slightly over quota. A truly atomic reservation (check and
+reserve space in one statement, like `consume_download`'s approach to the
+download-limit race) is possible but wasn't worth building here: the
+consequence of losing this particular race is "slightly over a soft
+quota for a short time," not a security or correctness failure, and at
+personal-tool traffic levels concurrent uploads landing in the exact same
+moment right at the boundary is a rare edge case, not a normal one.

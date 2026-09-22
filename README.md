@@ -39,17 +39,22 @@ Supabase Dashboard:
 3. **SQL Editor → New query** again, paste the contents of
    `supabase/migrations/0002_abuse.sql`, and run it. This adds the
    `abuse_ips` table and `record_strike` function backing the escalating
-   ban system (§8).
+   ban system (§6).
 
-4. **Storage → New bucket**: name it exactly `droplink`, and leave it
+4. **SQL Editor → New query** once more, paste the contents of
+   `supabase/migrations/0003_capacity.sql`, and run it. This adds the
+   `total_storage_used` function backing the storage-capacity gating (§6).
+
+5. **Storage → New bucket**: name it exactly `droplink`, and leave it
    **private** (do not enable "Public bucket"). No further bucket
    configuration is needed — all access goes through signed URLs minted by
    the server.
 
-5. Generate a `CRON_SECRET` (any long random value, e.g.
+6. Generate a `CRON_SECRET` (any long random value, e.g.
    `openssl rand -hex 32`) and set it in `.env.local` and later in Vercel.
 
-6. (Optional) Set up the admin override code — see §8.
+7. (Optional) Set up the admin override code, and/or set
+   `STORAGE_QUOTA_BYTES` to match your actual plan — see §6.
 
 ## 3. Environment variables
 
@@ -60,7 +65,8 @@ See `.env.example` for the full list with inline documentation. Summary:
 `NEXT_PUBLIC_SITE_URL`.
 
 **Server-only** (never shipped to the browser, never committed):
-`SUPABASE_SERVICE_ROLE_KEY`, `CRON_SECRET`, `ADMIN_TOTP_SECRET` (optional).
+`SUPABASE_SERVICE_ROLE_KEY`, `CRON_SECRET`, `ADMIN_TOTP_SECRET` (optional),
+`STORAGE_QUOTA_BYTES` (optional, see §6).
 
 ## 4. Testing
 
@@ -105,16 +111,20 @@ empty table and are safe to run against a project with real data in it.
    objects are physically removed from storage. On a Pro plan, you can
    tighten the schedule (e.g. `*/15 * * * *`) with no other code changes.
 
-## 6. Admin override code, abuse bans, and multi-file uploads
+## 6. Admin override code, storage capacity, abuse bans, and multi-file uploads
 
 **Admin override code.** Standard uploads are capped at
 `MAX_FILE_SIZE_BYTES` (500 MB) and `MAX_EXPIRATION_MINUTES` (30 days). A
 6-digit TOTP code — the same kind an authenticator app (Google
 Authenticator, Authy, 1Password, etc.) generates, not a static password —
-unlocks `MAX_FILE_SIZE_BYTES_ADMIN` (5 GB) and
-`MAX_EXPIRATION_MINUTES_ADMIN` (1 year) for that upload. There is no admin
-account or login — it's one shared secret (`ADMIN_TOTP_SECRET`) that you
-add to an authenticator app once. To set it up:
+unlocks up to `MAX_FILE_SIZE_BYTES_ADMIN` (5 GB) and
+`MAX_EXPIRATION_MINUTES_ADMIN` (1 year) for that upload. "Up to" matters:
+the code raises the *ceiling*, but the actual allowed size is also clamped
+to whatever storage space is really left (quota minus current usage minus
+a fixed safety margin — see the capacity section below), so an admin code
+can never push an upload past physical reality. There is no admin account
+or login — it's one shared secret (`ADMIN_TOTP_SECRET`) that you add to an
+authenticator app once. To set it up:
 
 1. Generate a base32 secret (`lib/totp.ts` exports `base32Encode` if you
    want to derive one from random bytes yourself, or use any TOTP secret
@@ -129,6 +139,27 @@ If `ADMIN_TOTP_SECRET` is never set, the admin code field is simply never
 accepted — every upload is held to the standard limits, no configuration
 required.
 
+**Storage capacity gating.** Supabase's free tier gives a small storage
+quota (roughly 1 GB by default here; set `STORAGE_QUOTA_BYTES` to match
+your actual plan). `GET /api/capacity` (`lib/capacity.ts`) reports how
+full the bucket is as one of three states, computed from the sum of
+`size_bytes` across every non-deleted row — there's no Management API
+token available to ask Supabase directly, so this app tracks the one
+number it actually controls:
+
+- **ok** (below 85% of quota): everything works normally.
+- **near_full** (85–97%): the upload form locks the expiration dropdown to
+  the 10-minute option only, with a visible disclaimer explaining why —
+  faster turnover means sooner cleanup means sooner free space. Enforced
+  server-side too (`/api/upload/init` rejects any other expiration with a
+  409 while near-full), not just hidden in the UI.
+- **full** (97%+): new uploads are rejected outright (503) — the form
+  shows a "Server Full" message instead, telling the visitor to check
+  back later. Existing links, downloads, and "Recent links" (§8) still
+  work; only *new* uploads are blocked. This applies even with a valid
+  admin code — raising the ceiling doesn't help when there's no room left
+  to raise into.
+
 **Abuse bans.** Every rejected attempt to exceed the standard limits
 without a valid admin code (oversized file, over-long expiration, a wrong
 admin code, or repeatedly tripping the request-rate limiter) counts as a
@@ -142,22 +173,31 @@ protection. See `ARCHITECTURE.md` §14 for the full rationale.
 
 **Multi-file uploads.** The upload form accepts up to `MAX_FILES_PER_BATCH`
 (50) files at once, sharing one set of expiration/downloads/admin-code
-settings, uploaded with limited concurrency. By default each file gets its
-own independent share link — a batch of individual links, not one link
-covering multiple files (a genuine "crate contains many files" schema
-concept would be needed for that, and this version doesn't implement it).
+settings, uploaded with limited concurrency. Clicking "Ship N files" with
+2+ files queued doesn't upload immediately — it asks first: **"One QR code
+(bundle as .zip)"** or **"Separate links (N QR codes)"**. A single file
+skips this and ships immediately as before ("Ship it").
 
-Checking **"Bundle as one .zip"** (shown once 2+ files are queued) sidesteps
-that limitation for the common case: the browser compresses all selected
-files into a single ZIP, streamed straight into the compressor a chunk at
-a time (`lib/zip.ts`, via `fflate`'s streaming API — never holding a whole
-file's raw bytes and its compressed copy in memory at once, which matters
-at the multi-GB sizes an admin code allows), and that one ZIP then goes
-through the exact same single-file pipeline as anything else. One link,
-one file server-side, no schema change. Compression genuinely shrinks
-text/uncompressed data; it won't do much for already-compressed formats
-like photos or video, which the checkbox's own helper text says plainly
-rather than overpromising "saves space" for every file type.
+- **Separate links**: each file gets its own independent share link and
+  token — a batch of individual links, not one link covering multiple
+  files (a genuine "crate contains many files" schema concept would be
+  needed for a true single-link bundle server-side, and this version
+  doesn't implement that).
+- **One QR code**: the browser compresses all selected files into a
+  single ZIP, streamed straight into the compressor a chunk at a time
+  (`lib/zip.ts`, via `fflate`'s streaming API — never holding a whole
+  file's raw bytes and its compressed copy in memory at once, which
+  matters at the multi-GB sizes an admin code allows), and that one ZIP
+  then goes through the exact same single-file pipeline as anything else.
+  One link, one file server-side, no schema change. Compression genuinely
+  shrinks text/uncompressed data; it won't do much for already-compressed
+  formats like photos or video, which the dialog's own helper text says
+  plainly rather than overpromising "saves space" for every file type.
+
+**Custom download limit.** The Downloads dropdown's presets (1/5/10/
+Unlimited) now include "Custom…", revealing a number input validated
+server-side between `MIN_DOWNLOADS_LIMIT` (1) and `MAX_DOWNLOADS_LIMIT`
+(100,000) — the same pattern as the existing custom expiration input.
 
 ## 7. File stats
 
@@ -175,16 +215,24 @@ reload.
 
 ## 8. Cookie consent & link persistence
 
-The only client-side persistence this app does is remembering the visitor's
-most recent upload result(s) so switching tabs or an accidental refresh
-doesn't lose a share link/QR code they haven't copied yet. This is
-implemented with `sessionStorage` (tab-scoped, cleared when the tab closes,
-never transmitted to the server) rather than an actual HTTP cookie — a
-real cookie would need to be sent to the server on every request for no
-benefit here, since nothing server-side needs to read this state. A banner
-(`components/ConsentBanner.tsx`) asks for consent before anything is
-written; declining just means results don't survive a refresh, with no
-other functional change.
+Client-side persistence here is two things, both gated behind one consent
+banner (`components/ConsentBanner.tsx`) and both implemented with browser
+storage rather than an actual HTTP cookie — a real cookie would need to be
+sent to the server on every request for no benefit here, since nothing
+server-side needs to read either of these:
+
+- **Last result, this tab** (`sessionStorage`): the visitor's most recent
+  upload result(s), so switching tabs or an accidental refresh doesn't
+  lose a share link/QR they haven't copied yet. Tab-scoped, cleared when
+  the tab closes.
+- **Recent links** (`localStorage`, `lib/history.ts`): up to the last 20
+  results across visits to this browser — there's no "old QR codes" view
+  otherwise, since there are no accounts to attach a real history to. The
+  home page shows a "Recent links (N)" toggle when any exist, each with
+  its own Copy Link / Show QR, plus a "Clear recent links" action.
+
+Declining consent means neither is written; results simply don't survive
+a refresh or a return visit, with no other functional change.
 
 ## 9. Known limitations
 
@@ -207,8 +255,17 @@ other functional change.
   general strike system — a wrong code is a strike like any other
   violation, capped at `STRIKE_THRESHOLD` attempts before a ban, on top of
   the code itself rotating every 30 seconds.
-- Multi-file uploads produce one independent link per file unless "Bundle
-  as one .zip" is checked — see §6.
+- Multi-file uploads produce one independent link per file unless "One QR
+  code" is chosen at ship time — see §6.
+- Storage capacity gating (§6) is a soft, best-effort signal computed at
+  request time, not an atomic reservation — two uploads racing right at
+  the "full" boundary could both be admitted and briefly push usage
+  slightly over quota. Acceptable for a personal-scale tool; not something
+  worth a distributed-locking scheme here.
+- "Recent links" (§8) is per-browser (`localStorage`), not synced anywhere
+  — a different device or a cleared browser profile won't see it. It's a
+  convenience for the one browser you actually uploaded from, not a real
+  history service.
 - ZIP bundling runs entirely in the browser; on lower-end devices or very
   large batches, compression takes real time and the tab does the work
   (off the main thread via a Web Worker, but still local CPU/memory) —
