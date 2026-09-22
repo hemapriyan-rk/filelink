@@ -1,23 +1,24 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { getSupabaseBrowser } from "@/lib/supabase-browser";
 import { generateQrDataUrl } from "@/lib/qr";
 import {
   ALLOWED_EXPIRATIONS_MINUTES,
   ALLOWED_MAX_DOWNLOADS,
   EXPIRATION_LABELS,
   MAX_DOWNLOADS_LIMIT,
+  MAX_EXPIRATION_MINUTES,
   MAX_FILES_PER_BATCH,
   MAX_FILE_SIZE_BYTES,
+  MAX_FILE_SIZE_BYTES_ADMIN,
   MIN_DOWNLOADS_LIMIT,
   MIN_EXPIRATION_MINUTES,
   NEAR_FULL_EXPIRATION_MINUTES,
-  STORAGE_BUCKET,
 } from "@/lib/constants";
 import { hasConsent } from "@/lib/consent";
 import { zipFiles } from "@/lib/zip";
 import { addToHistory } from "@/lib/history";
+import { uploadFileWithProgress } from "@/lib/uploadWithProgress";
 import { CountdownTimer } from "./CountdownTimer";
 import { StatsToggle } from "./StatsToggle";
 
@@ -25,6 +26,7 @@ type Stage = "idle" | "choosing" | "uploading" | "ready" | "banned";
 const CUSTOM = "custom" as const;
 const CONCURRENCY = 3;
 const SESSION_KEY = "cratelink:lastResults";
+const LARGE_FILE_BYTES = 20 * 1024 * 1024; // 20 MB — "this might take a while"
 
 interface Capacity {
   status: "ok" | "near_full" | "full";
@@ -44,6 +46,7 @@ interface FileResult {
   filename: string;
   expiresAt: string | null;
   isPermanent: boolean;
+  isAdmin: boolean;
 }
 
 type QueueStatus = "queued" | "uploading" | "done" | "error";
@@ -52,6 +55,7 @@ interface QueueItem {
   id: string;
   file: File;
   status: QueueStatus;
+  progress?: number;
   error?: string;
   result?: FileResult;
 }
@@ -68,11 +72,119 @@ function formatBytes(bytes: number): string {
   return `${value.toFixed(1)} ${units[unitIndex]}`;
 }
 
+function QueueStatusIcon({ item }: { item: QueueItem }) {
+  if (item.status === "done") {
+    return (
+      <span className="text-[var(--crate-red)]" aria-label="Uploaded" title="Uploaded">
+        ✓
+      </span>
+    );
+  }
+  if (item.status === "error") {
+    return (
+      <span className="text-[var(--crate-red)]" aria-label="Failed" title={item.error}>
+        !
+      </span>
+    );
+  }
+  if (item.status === "uploading") {
+    return (
+      <span
+        className="inline-block w-3 h-3 rounded-full border-2 border-[var(--crate-red)] border-t-transparent animate-spin"
+        aria-label="Uploading"
+      />
+    );
+  }
+  return null;
+}
+
+/** Keep Permanently re-verifies a fresh admin code at the moment it's used,
+ * independent of how the file was originally uploaded — see
+ * app/api/keep-permanent/[token]/route.ts. A code entered minutes earlier
+ * during upload would likely have already rotated past its 30s window by
+ * the time someone clicks this, so it always asks fresh. */
+function KeepPermanentlyControl({
+  publicToken,
+  onPromoted,
+}: {
+  publicToken: string;
+  onPromoted: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [code, setCode] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function confirm() {
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/keep-permanent/${publicToken}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ adminCode: code.trim() }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error || "Could not keep this file permanently.");
+      }
+      onPromoted();
+      setOpen(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Something went wrong.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (!open) {
+    return (
+      <button
+        onClick={() => setOpen(true)}
+        className="rounded-md bg-[var(--crate-red)] text-white px-3 py-1.5 text-xs font-medium hover:bg-[var(--crate-red-deep)] transition-colors"
+      >
+        Keep permanently
+      </button>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-1.5 w-full">
+      <div className="flex gap-2">
+        <input
+          type="text"
+          inputMode="numeric"
+          placeholder="Admin code"
+          value={code}
+          onChange={(e) => setCode(e.target.value)}
+          className="flex-1 bg-white border border-[var(--line)] rounded-md px-2.5 py-1.5 text-xs font-data"
+        />
+        <button
+          onClick={confirm}
+          disabled={busy}
+          className="rounded-md bg-[var(--crate-red)] text-white px-3 py-1.5 text-xs font-medium hover:bg-[var(--crate-red-deep)] transition-colors disabled:opacity-50"
+        >
+          {busy ? "…" : "Confirm"}
+        </button>
+        <button
+          onClick={() => {
+            setOpen(false);
+            setError(null);
+          }}
+          className="text-xs text-[var(--ink-soft)] underline"
+        >
+          Cancel
+        </button>
+      </div>
+      {error && <p className="text-xs text-[var(--crate-red)]">{error}</p>}
+    </div>
+  );
+}
+
 function ResultRow({ result }: { result: FileResult }) {
   const [copied, setCopied] = useState(false);
   const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
   const [showQr, setShowQr] = useState(false);
-  const [promoting, setPromoting] = useState(false);
   const [permanent, setPermanent] = useState(result.isPermanent);
   const [expiresAt, setExpiresAt] = useState(result.expiresAt);
 
@@ -102,24 +214,18 @@ function ResultRow({ result }: { result: FileResult }) {
     }
   }
 
-  async function keepPermanently() {
-    setPromoting(true);
-    try {
-      const res = await fetch(`/api/keep-permanent/${result.publicToken}`, { method: "POST" });
-      if (res.ok) {
-        setPermanent(true);
-        setExpiresAt(null);
-      }
-    } finally {
-      setPromoting(false);
-    }
-  }
-
   return (
     <div className="border border-[var(--line)] rounded-lg p-4 bg-white/70">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <p className="font-medium text-sm break-all">{result.filename}</p>
+          <p className="font-medium text-sm break-all">
+            {result.filename}
+            {result.isAdmin && (
+              <span className="ml-2 align-middle inline-block rounded-full bg-[var(--crate-red)] text-white text-[10px] font-medium px-1.5 py-0.5 font-data">
+                ADMIN
+              </span>
+            )}
+          </p>
           <CountdownTimer expiresAt={expiresAt} isPermanent={permanent} />
         </div>
       </div>
@@ -139,7 +245,7 @@ function ResultRow({ result }: { result: FileResult }) {
 
       <p className="font-data text-xs text-[var(--ink-soft)] break-all mt-2">{result.shareUrl}</p>
 
-      <div className="flex flex-wrap gap-2 mt-3">
+      <div className="flex flex-wrap items-center gap-2 mt-3">
         <button
           onClick={copyLink}
           className="rounded-md border border-[var(--crate-red)] text-[var(--crate-red)] px-3 py-1.5 text-xs font-medium hover:bg-[var(--crate-red)] hover:text-white transition-colors"
@@ -158,14 +264,17 @@ function ResultRow({ result }: { result: FileResult }) {
         >
           Save QR
         </button>
-        {!permanent && (
-          <button
-            onClick={keepPermanently}
-            disabled={promoting}
-            className="rounded-md bg-[var(--crate-red)] text-white px-3 py-1.5 text-xs font-medium hover:bg-[var(--crate-red-deep)] transition-colors disabled:opacity-50"
-          >
-            {promoting ? "Saving…" : "Keep permanently"}
-          </button>
+        {/* Keep Permanently only ever shows for admin-uploaded files — it
+            also re-verifies a fresh admin code server-side regardless, but
+            there's no reason to dangle the option in front of everyone. */}
+        {!permanent && result.isAdmin && (
+          <KeepPermanentlyControl
+            publicToken={result.publicToken}
+            onPromoted={() => {
+              setPermanent(true);
+              setExpiresAt(null);
+            }}
+          />
         )}
       </div>
 
@@ -178,13 +287,15 @@ function ResultRow({ result }: { result: FileResult }) {
 
 export function UploadForm() {
   const [queue, setQueue] = useState<QueueItem[]>([]);
-  const [expirationChoice, setExpirationChoice] = useState<string>(String(ALLOWED_EXPIRATIONS_MINUTES[1]));
+  const [expirationChoice, setExpirationChoice] = useState<string>(String(ALLOWED_EXPIRATIONS_MINUTES[0]));
   const [customAmount, setCustomAmount] = useState<number>(2);
   const [customUnit, setCustomUnit] = useState<CustomUnit>("hours");
   const [downloadsChoice, setDownloadsChoice] = useState<string>("");
   const [customDownloads, setCustomDownloads] = useState<number>(20);
   const [showAdminField, setShowAdminField] = useState(false);
   const [adminCode, setAdminCode] = useState("");
+  const [showAdminModal, setShowAdminModal] = useState(false);
+  const [modalCode, setModalCode] = useState("");
   const [zipProgress, setZipProgress] = useState<number | null>(null);
   const [stage, setStage] = useState<Stage>("idle");
   const [error, setError] = useState<string | null>(null);
@@ -259,16 +370,19 @@ export function UploadForm() {
         setError(`You can send at most ${MAX_FILES_PER_BATCH} files at once.`);
         return prev;
       }
-      const oversized = incomingArr.filter((f) => f.size > MAX_FILE_SIZE_BYTES);
-      const accepted = incomingArr
-        .filter((f) => f.size <= MAX_FILE_SIZE_BYTES)
-        .slice(0, room);
+      // The hard sanity ceiling here is the admin ceiling, not the standard
+      // one — a file between the two is allowed into the queue, and if
+      // Ship is pressed without a valid admin code, that's exactly what
+      // triggers the admin-code prompt (see handleUpload) rather than
+      // silently discarding the file at selection time.
+      const oversized = incomingArr.filter((f) => f.size > MAX_FILE_SIZE_BYTES_ADMIN);
+      const accepted = incomingArr.filter((f) => f.size <= MAX_FILE_SIZE_BYTES_ADMIN).slice(0, room);
 
       if (oversized.length > 0) {
         setError(
           `${oversized.length} file${oversized.length > 1 ? "s exceed" : " exceeds"} the ${Math.floor(
-            MAX_FILE_SIZE_BYTES / (1024 * 1024)
-          )} MB limit and ${oversized.length > 1 ? "were" : "was"} skipped. Use an admin code for larger files.`
+            MAX_FILE_SIZE_BYTES_ADMIN / (1024 * 1024 * 1024)
+          )} GB hard limit and ${oversized.length > 1 ? "were" : "was"} skipped.`
         );
       } else if (incomingArr.length > room) {
         setError(`Only ${room} more file${room === 1 ? "" : "s"} could be added (${MAX_FILES_PER_BATCH} max).`);
@@ -311,6 +425,13 @@ export function UploadForm() {
     return customDownloads;
   }
 
+  /** Whether the current form selections would need a valid admin code to go through. */
+  function needsAdminCode(): boolean {
+    const resolvedExpires = resolveExpiresMinutes();
+    if (resolvedExpires !== null && resolvedExpires > MAX_EXPIRATION_MINUTES) return true;
+    return queue.some((q) => q.file.size > MAX_FILE_SIZE_BYTES);
+  }
+
   async function uploadOne(
     item: QueueItem,
     expiresMinutes: number,
@@ -345,13 +466,9 @@ export function UploadForm() {
 
       const init = await initRes.json();
 
-      const supabase = getSupabaseBrowser();
-      const { error: uploadError } = await supabase.storage
-        .from(STORAGE_BUCKET)
-        .uploadToSignedUrl(init.storagePath, init.signedToken, item.file, {
-          contentType: item.file.type || "application/octet-stream",
-        });
-      if (uploadError) throw new Error("Upload failed.");
+      await uploadFileWithProgress(init.signedUrl, item.file, (fraction) => {
+        setQueue((prev) => prev.map((q) => (q.id === item.id ? { ...q, progress: fraction } : q)));
+      });
 
       const confirmRes = await fetch("/api/upload/confirm", {
         method: "POST",
@@ -373,6 +490,7 @@ export function UploadForm() {
           filename: item.file.name,
           expiresAt: confirmed.expiresAt,
           isPermanent: false,
+          isAdmin: !!init.isAdmin,
         },
       };
     } catch (err) {
@@ -450,7 +568,7 @@ export function UploadForm() {
       return;
     }
 
-    setQueue((prev) => prev.map((q) => ({ ...q, status: "uploading" as const })));
+    setQueue((prev) => prev.map((q) => ({ ...q, status: "uploading" as const, progress: 0 })));
 
     const pending = [...queue];
     const results: QueueItem[] = [];
@@ -495,6 +613,12 @@ export function UploadForm() {
     }
     setError(null);
 
+    if (needsAdminCode() && !adminCode.trim()) {
+      setModalCode("");
+      setShowAdminModal(true);
+      return;
+    }
+
     if (queue.length > 1) {
       setStage("choosing");
       return;
@@ -514,6 +638,12 @@ export function UploadForm() {
       // ignore
     }
   }
+
+  const customExpiresTooLong = (() => {
+    if (expirationChoice !== CUSTOM) return false;
+    const raw = Math.round(customAmount * UNIT_MINUTES[customUnit]);
+    return Number.isFinite(raw) && raw > MAX_EXPIRATION_MINUTES;
+  })();
 
   if (stage === "banned") {
     const until = bannedUntil ? new Date(bannedUntil).toLocaleString() : null;
@@ -609,6 +739,47 @@ export function UploadForm() {
 
   return (
     <div className="flex flex-col gap-5">
+      {showAdminModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4">
+          <div className="glass-panel rounded-xl p-6 w-full max-w-xs text-center">
+            <p className="font-display text-xl text-[var(--crate-red)]">ADMIN CODE NEEDED</p>
+            <p className="text-xs text-[var(--ink-soft)] mt-2">
+              A file over {Math.floor(MAX_FILE_SIZE_BYTES / (1024 * 1024))} MB or an expiration over{" "}
+              {Math.floor(MAX_EXPIRATION_MINUTES / (24 * 60))} days needs an admin code. Enter it now,
+              or cancel to go back and adjust your selections instead.
+            </p>
+            <input
+              type="text"
+              inputMode="numeric"
+              autoFocus
+              placeholder="6-digit code"
+              value={modalCode}
+              onChange={(e) => setModalCode(e.target.value)}
+              className="mt-3 w-full bg-white border border-[var(--line)] rounded-md px-3 py-2 text-sm font-data text-center"
+            />
+            <div className="flex gap-2 mt-3">
+              <button
+                onClick={() => setShowAdminModal(false)}
+                className="flex-1 rounded-md border border-[var(--line)] py-2 text-sm font-medium hover:border-[var(--crate-red)] transition-colors"
+              >
+                Cancel upload
+              </button>
+              <button
+                onClick={() => {
+                  setAdminCode(modalCode);
+                  setShowAdminField(true);
+                  setShowAdminModal(false);
+                }}
+                disabled={!modalCode.trim()}
+                className="flex-1 rounded-md bg-[var(--crate-red)] text-white py-2 text-sm font-medium hover:bg-[var(--crate-red-deep)] transition-colors disabled:opacity-40"
+              >
+                Continue
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div
         onDragOver={(e) => {
           e.preventDefault();
@@ -621,11 +792,19 @@ export function UploadForm() {
           if (e.dataTransfer.files?.length) addFiles(e.dataTransfer.files);
         }}
         onClick={() => fileInputRef.current?.click()}
-        className={`h-36 sm:h-40 rounded-xl border-2 border-dashed flex flex-col items-center justify-center cursor-pointer transition-colors text-center px-4 ${
-          dragActive
-            ? "border-[var(--crate-red)] bg-[var(--crate-red)]/5"
-            : "border-[var(--ink)]/25 hover:border-[var(--crate-red)]/50"
-        }`}
+        className={
+          queue.length > 0
+            ? `rounded-lg border-2 border-dashed flex items-center justify-center gap-2 cursor-pointer transition-colors text-center px-4 py-3 ${
+                dragActive
+                  ? "border-[var(--crate-red)] bg-[var(--crate-red)]/5"
+                  : "border-[var(--ink)]/20 hover:border-[var(--crate-red)]/50"
+              }`
+            : `h-36 sm:h-40 rounded-xl border-2 border-dashed flex flex-col items-center justify-center cursor-pointer transition-colors text-center px-4 ${
+                dragActive
+                  ? "border-[var(--crate-red)] bg-[var(--crate-red)]/5"
+                  : "border-[var(--ink)]/25 hover:border-[var(--crate-red)]/50"
+              }`
+        }
       >
         <input
           ref={fileInputRef}
@@ -637,34 +816,64 @@ export function UploadForm() {
             e.target.value = "";
           }}
         />
-        <p className="font-medium">Drop files here</p>
-        <p className="text-sm text-[var(--ink-soft)]">
-          or tap to browse · up to {MAX_FILES_PER_BATCH} files
-        </p>
+        {queue.length > 0 ? (
+          <p className="text-sm font-medium text-[var(--crate-red)]">+ Add more files</p>
+        ) : (
+          <>
+            <p className="font-medium">Drop files here</p>
+            <p className="text-sm text-[var(--ink-soft)]">
+              or tap to browse · up to {MAX_FILES_PER_BATCH} files
+            </p>
+          </>
+        )}
       </div>
 
       {queue.length > 0 && (
-        <div className="flex flex-col gap-1.5 max-h-40 overflow-y-auto pr-1">
+        <div className="flex flex-col gap-2 max-h-48 overflow-y-auto pr-1">
           {queue.map((item) => (
             <div
               key={item.id}
-              className="flex items-center justify-between gap-2 text-sm border border-[var(--line)] rounded-md px-3 py-1.5 bg-white/60"
+              className={`rounded-md border px-3 py-2 text-sm transition-colors ${
+                item.status === "done"
+                  ? "border-[var(--crate-red)]/40 bg-[var(--crate-red)]/5"
+                  : item.status === "error"
+                    ? "border-[var(--crate-red)] bg-[var(--crate-red)]/10"
+                    : "border-[var(--line)] bg-white/80"
+              }`}
             >
-              <span className="truncate">{item.file.name}</span>
-              <span className="flex items-center gap-2 shrink-0">
-                <span className="text-xs text-[var(--ink-soft)] font-data">
-                  {formatBytes(item.file.size)}
+              <div className="flex items-center justify-between gap-2">
+                <span className="flex items-center gap-2 min-w-0">
+                  <QueueStatusIcon item={item} />
+                  <span className="truncate">{item.file.name}</span>
                 </span>
-                {!uploading && (
-                  <button
-                    onClick={() => removeFile(item.id)}
-                    aria-label={`Remove ${item.file.name}`}
-                    className="text-[var(--ink-soft)] hover:text-[var(--crate-red)]"
-                  >
-                    ×
-                  </button>
-                )}
-              </span>
+                <span className="flex items-center gap-2 shrink-0">
+                  <span className="text-xs text-[var(--ink-soft)] font-data">
+                    {formatBytes(item.file.size)}
+                  </span>
+                  {!uploading && (
+                    <button
+                      onClick={() => removeFile(item.id)}
+                      aria-label={`Remove ${item.file.name}`}
+                      className="text-[var(--ink-soft)] hover:text-[var(--crate-red)]"
+                    >
+                      ×
+                    </button>
+                  )}
+                </span>
+              </div>
+              {item.status === "uploading" && item.file.size > LARGE_FILE_BYTES && (
+                <div className="mt-1.5">
+                  <div className="h-1 rounded-full bg-[var(--line)] overflow-hidden">
+                    <div
+                      className="h-full bg-[var(--crate-red)] transition-all"
+                      style={{ width: `${Math.round((item.progress ?? 0) * 100)}%` }}
+                    />
+                  </div>
+                  <p className="text-[10px] text-[var(--ink-soft)] mt-0.5">
+                    Large file — this may take a while ({Math.round((item.progress ?? 0) * 100)}%)
+                  </p>
+                </div>
+              )}
             </div>
           ))}
         </div>
@@ -713,23 +922,34 @@ export function UploadForm() {
               </select>
 
               {expirationChoice === CUSTOM && (
-                <div className="mt-2 flex gap-2">
-                  <input
-                    type="number"
-                    min={1}
-                    value={customAmount}
-                    onChange={(e) => setCustomAmount(Number(e.target.value))}
-                    className="w-20 bg-white border border-[var(--line)] rounded-md px-3 py-2 text-sm font-data"
-                  />
-                  <select
-                    value={customUnit}
-                    onChange={(e) => setCustomUnit(e.target.value as CustomUnit)}
-                    className="flex-1 bg-white border border-[var(--line)] rounded-md px-3 py-2 text-sm"
-                  >
-                    <option value="minutes">Minutes</option>
-                    <option value="hours">Hours</option>
-                    <option value="days">Days</option>
-                  </select>
+                <div className="mt-2">
+                  <div className="flex gap-2">
+                    <input
+                      type="number"
+                      min={MIN_EXPIRATION_MINUTES}
+                      value={customAmount}
+                      onChange={(e) => setCustomAmount(Number(e.target.value))}
+                      className="w-20 bg-white border border-[var(--line)] rounded-md px-3 py-2 text-sm font-data"
+                    />
+                    <select
+                      value={customUnit}
+                      onChange={(e) => setCustomUnit(e.target.value as CustomUnit)}
+                      className="flex-1 bg-white border border-[var(--line)] rounded-md px-3 py-2 text-sm"
+                    >
+                      <option value="minutes">Minutes</option>
+                      <option value="hours">Hours</option>
+                      <option value="days">Days</option>
+                    </select>
+                  </div>
+                  <p className="text-xs text-[var(--ink-soft)] mt-1">
+                    Up to {Math.floor(MAX_EXPIRATION_MINUTES / (24 * 60))} days without an admin code.
+                  </p>
+                  {customExpiresTooLong && (
+                    <p className="text-xs text-[var(--crate-red)] mt-1">
+                      Exceeds the standard {Math.floor(MAX_EXPIRATION_MINUTES / (24 * 60))}-day limit
+                      — an admin code will be required to ship this.
+                    </p>
+                  )}
                 </div>
               )}
             </>
@@ -786,7 +1006,7 @@ export function UploadForm() {
               onClick={() => setShowAdminField(true)}
               className="text-xs text-[var(--ink-soft)] underline"
             >
-              Have an admin code?
+              Have an admin code? (optional)
             </button>
           )}
         </div>

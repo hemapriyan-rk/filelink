@@ -45,15 +45,20 @@ Supabase Dashboard:
    `supabase/migrations/0003_capacity.sql`, and run it. This adds the
    `total_storage_used` function backing the storage-capacity gating (§6).
 
-5. **Storage → New bucket**: name it exactly `droplink`, and leave it
+5. **SQL Editor → New query** one more time, paste the contents of
+   `supabase/migrations/0004_admin_and_metadata.sql`, and run it. This adds
+   the `is_admin_upload` and `uploader_ip` columns (§10).
+
+6. **Storage → New bucket**: name it exactly `droplink`, and leave it
    **private** (do not enable "Public bucket"). No further bucket
    configuration is needed — all access goes through signed URLs minted by
    the server.
 
-6. Generate a `CRON_SECRET` (any long random value, e.g.
-   `openssl rand -hex 32`) and set it in `.env.local` and later in Vercel.
+7. Generate a `CRON_SECRET` (any long random value, e.g.
+   `openssl rand -hex 32`) and set it in `.env.local` and later in Vercel
+   (and as a GitHub Actions repository secret of the same name — see §10).
 
-7. (Optional) Set up the admin override code, and/or set
+8. (Optional) Set up the admin override code, and/or set
    `STORAGE_QUOTA_BYTES` to match your actual plan — see §6.
 
 ## 3. Environment variables
@@ -234,7 +239,84 @@ server-side needs to read either of these:
 Declining consent means neither is written; results simply don't survive
 a refresh or a return visit, with no other functional change.
 
-## 9. Known limitations
+## 9. Keep Permanently is admin-only
+
+"Keep Permanently" only ever appears for a file uploaded with a valid
+admin code, and clicking it prompts for a fresh 6-digit code on the spot
+— `POST /api/keep-permanent/[token]` independently verifies a valid admin
+TOTP code on every call, regardless of how the file was originally
+uploaded or what the UI shows. This closes a real gap the UI-only
+approach would have left open: without a server-side check, anyone with
+any share link could have called that endpoint directly and made any
+file permanent. A code entered at upload time isn't reused for this later
+action, since TOTP codes rotate every 30 seconds and are very likely
+stale by the time someone clicks the button.
+
+## 10. Storage organization, retention, and legal pages
+
+**Where files live.** Objects are stored under
+`temp/<yyyy>/<mm>/<dd>/<hh>/<random>` (moved to the equivalent `perm/...`
+path when kept permanently) — organized by upload time purely for
+operational tidiness as the bucket grows. The random suffix, not the
+folder structure, is what makes a path unguessable; the date folders
+carry no identifying information.
+
+**What's tracked, and what isn't.** Each row also records the uploading
+IP address and whether the upload used the admin override
+(`uploader_ip`, `is_admin_upload` — see `supabase/migrations/0004_admin_and_metadata.sql`).
+Neither is ever exposed to any client. The IP is **not** encoded into the
+storage path or filename — doing that would be an unnecessary privacy
+exposure (PII sitting in a path, potentially visible in logs) for no
+functional benefit, since the path is already unguessable random data on
+its own. It exists purely as metadata for abuse investigation and
+responding to a valid legal request (see the Terms of Service).
+
+**Deletion and retention.** File *content* is deleted from storage once
+its link expires or is kept permanently reversed (§6's escalating cleanup
+frequency via GitHub Actions — see below). The *database row* for a
+deleted file is not removed; it's kept indefinitely (filename, size,
+timestamps, uploader IP, download count — never the file content) for
+abuse-prevention and legal-compliance purposes, which is stated plainly
+in the Privacy Policy rather than promising a retention window the app
+doesn't actually enforce.
+
+**No backups.** This app deliberately does not back up uploaded files.
+Backing up content that both the product's premise (temporary sharing)
+and its storage-constrained free-tier quota (§6) argue for deleting
+promptly would work against both goals at once, and would mean an
+"expired" file secretly still existing somewhere — not what anyone
+sharing through a temporary link would expect.
+
+**Faster physical cleanup than Vercel's Cron allows.** Vercel's Hobby
+plan only runs a Cron Job once a day (§5), which is fine for
+*correctness* — every download and page load independently re-validates
+expiry regardless of physical cleanup (`ARCHITECTURE.md` §8) — but leaves
+expired files sitting in the small storage quota for up to a day.
+`.github/workflows/cleanup.yml` calls the same authenticated
+`/api/cron/cleanup` endpoint every 10 minutes via GitHub Actions instead,
+at no extra cost or infrastructure — it's just a scheduled request to a
+route that already exists and already enforces its own auth. To enable
+it: add a repository secret named `CRON_SECRET` (Settings → Secrets and
+variables → Actions → New repository secret) with the same value as the
+`CRON_SECRET` env var. GitHub's own scheduled-workflow minimum is 5
+minutes, and schedules can be delayed under platform load — still a large
+improvement over once a day, not a guarantee of exact 10-minute cadence.
+
+**Terms of Service and Privacy Policy** (`/terms`, `/privacy`) cover
+content responsibility, prohibited use, a copyright/illegal-content
+takedown procedure, the right to remove content, how legal requests and
+evidence preservation are handled, what data is collected and why
+(including the IP/metadata retention above), and the local-storage
+consent mechanism from §8. **The contact email on both pages is a
+placeholder (`REPLACE_WITH_CONTACT_EMAIL`)** — set it to a real address
+before relying on these pages; a takedown or legal-request procedure that
+points nowhere isn't a functioning one. These pages are drafted to cover
+the specific points requested for this project and reflect this app's
+actual behavior, but are not a substitute for review by a qualified
+lawyer, particularly regarding the Indian IT Rules obligations they
+reference.
+
+## 11. Known limitations
 
 - The upload rate limiter is in-memory per serverless instance (see
   `lib/ratelimit.ts`) — a reasonable speed bump for a personal tool, not a
@@ -277,7 +359,7 @@ a refresh or a return visit, with no other functional change.
   exposure, but worth knowing if you'd rather a recipient not see how many
   times a link has been used.
 
-## 10. Security assumptions
+## 12. Security assumptions
 
 - The service-role key and `CRON_SECRET` are kept out of version control
   and out of the browser bundle; anyone who obtains either has full control

@@ -13,6 +13,8 @@ export interface FileRow {
   status: FileStatus;
   download_count: number;
   max_downloads: number | null;
+  is_admin_upload: boolean;
+  uploader_ip: string | null;
 }
 
 export interface ConsumeDownloadRow {

@@ -1,0 +1,30 @@
+name: Crate Link cleanup
+
+# Vercel's Hobby plan only allows a Cron Job to run once a day
+# (vercel.json), which is fine for correctness — every download and page
+# load independently re-validates a link's expiry regardless of whether
+# physical cleanup has run (see ARCHITECTURE.md §8) — but leaves expired
+# files sitting in the (small, free-tier) storage bucket for up to a day.
+# This runs the same authenticated endpoint far more often, at no extra
+# cost and no extra infrastructure: it's just a scheduled HTTP request to
+# a route that already exists and already enforces its own auth.
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch: {}
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call cleanup endpoint
+        run: |
+          status=$(curl -s -o /tmp/body.json -w "%{http_code}" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            https://cratelink.vercel.app/api/cron/cleanup)
+          echo "HTTP status: $status"
+          cat /tmp/body.json
+          if [ "$status" -ge 400 ]; then
+            echo "Cleanup call failed"
+            exit 1
+          fi

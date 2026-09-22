@@ -9,10 +9,13 @@ export const MAX_FILE_SIZE_BYTES = 500 * 1024 * 1024; // 500 MB
 // Quick-select presets shown in the UI. The server does not require an
 // exact match against this list — it validates against MIN/MAX below —
 // these are just convenient shortcuts, with "Custom" covering everything
-// else in between.
-export const ALLOWED_EXPIRATIONS_MINUTES = [10, 60, 360, 1440, 4320, 10080] as const;
+// else in between. First entry is the UI's default selection.
+export const ALLOWED_EXPIRATIONS_MINUTES = [1, 2, 5, 10, 60, 360, 1440, 4320, 10080] as const;
 
 export const EXPIRATION_LABELS: Record<number, string> = {
+  1: "1 minute",
+  2: "2 minutes",
+  5: "5 minutes",
   10: "10 minutes",
   60: "1 hour",
   360: "6 hours",

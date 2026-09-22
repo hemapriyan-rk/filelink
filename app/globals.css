@@ -106,6 +106,42 @@ body {
   right: -7px;
 }
 
+/* Long-form legal content (Terms, Privacy). Deliberately plain — this is
+   reading material, not a UI surface that needs the ticket motif. */
+.prose-legal h2 {
+  font-weight: 600;
+  font-size: 1rem;
+  margin-top: 1.75rem;
+  margin-bottom: 0.5rem;
+}
+
+.prose-legal h2:first-child {
+  margin-top: 0;
+}
+
+.prose-legal p {
+  font-size: 0.875rem;
+  line-height: 1.6;
+  color: var(--ink);
+  margin-bottom: 0.75rem;
+}
+
+.prose-legal ul {
+  font-size: 0.875rem;
+  line-height: 1.6;
+  margin: 0.5rem 0 0.75rem 1.25rem;
+  list-style: disc;
+}
+
+.prose-legal li {
+  margin-bottom: 0.35rem;
+}
+
+.prose-legal a {
+  color: var(--crate-red);
+  text-decoration: underline;
+}
+
 @media (prefers-reduced-motion: reduce) {
   * {
     animation-duration: 0.001ms !important;

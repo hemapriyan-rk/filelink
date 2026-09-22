@@ -576,3 +576,66 @@ consequence of losing this particular race is "slightly over a soft
 quota for a short time," not a security or correctness failure, and at
 personal-tool traffic levels concurrent uploads landing in the exact same
 moment right at the boundary is a rare edge case, not a normal one.
+
+## 19. Keep Permanently as an independent admin action
+
+`promoteToPermanent` (§8) hasn't changed — the state-machine and race
+safety it provides are still exactly as described there. What changed is
+who can reach it: `POST /api/keep-permanent/[token]` now requires a
+valid, freshly-verified admin TOTP code on every call, using the same
+`verifyTotp`/strike/ban machinery as `/api/upload/init` (§14), and
+independent of whether the file being promoted was itself an admin
+upload. Two reasons it's decoupled that way rather than gated on the
+original upload's `is_admin_upload` flag:
+
+- **A code entered at upload time is very likely stale by the time
+  someone uses it.** TOTP codes rotate every 30 seconds; "Keep
+  Permanently" is a follow-up action taken later, sometimes much later.
+  Requiring a fresh code is both more correct and simpler than trying to
+  smuggle a short-lived code forward through client state.
+- **"Was this file admin-uploaded" and "should this file be kept
+  permanently" are genuinely different questions.** An admin should be
+  able to promote *any* file they decide is worth keeping, not only ones
+  that happened to be uploaded through the override originally. Coupling
+  the two would be both more restrictive and more complex for no benefit.
+
+`is_admin_upload` (`supabase/migrations/0004_admin_and_metadata.sql`)
+still exists and is still recorded at upload time — its purpose is
+narrower: giving the recipient's `/f/[token]` page a visibly distinct
+treatment (§8's request that scanning an admin-uploaded file's QR code
+shouldn't look identical to any other), not gating this action.
+
+## 20. Storage path structure and uploader metadata
+
+`temp/<yyyy>/<mm>/<dd>/<hh>/<random>` (`lib/token.ts: datePathPrefix`)
+replaces the flat `temp/<random>` layout purely for operational
+browsability as the bucket grows — nothing about the date folders is
+load-bearing for security, since the random suffix was already, and
+remains, the only thing that makes a path unguessable.
+
+**Why the uploader's IP is stored as a database column, never as part of
+the storage path or filename.** The two look superficially similar —
+both are "attach identifying info to this upload" — but they have
+opposite risk profiles. A random storage key in a private bucket is
+already unguessable; embedding an IP address into that path adds
+information exposure (in logs, in error messages, in anything that ever
+echoes a path back) with no corresponding functional benefit, since the
+path's job (being unguessable) was already done by the random component.
+A database column, by contrast, sits behind the same default-deny RLS
+posture as every other field on `files` (§6) — reachable only by the
+service-role key, never by any client — and directly serves the Terms of
+Service's evidence-preservation and legal-request commitments (§7 there)
+without adding any new exposure surface. Same information, meaningfully
+different blast radius depending on where it lives.
+
+## 21. No backups
+
+Uploaded files are not backed up anywhere beyond the single copy in the
+`droplink` bucket. This is a deliberate omission, not a gap: backing up
+content that both the product's own premise (links that stop working on
+purpose) and its storage-constrained free-tier quota (§18) argue for
+deleting promptly would actively work against both — doubling storage
+pressure on an already-small quota, and quietly keeping a copy of
+something a sender and recipient both reasonably expect to be gone once
+it expires. The Privacy Policy states this plainly rather than describing
+a backup posture the app doesn't actually have.

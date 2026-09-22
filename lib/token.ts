@@ -30,3 +30,18 @@ export function hashToken(token: string): string {
 export function generateStorageKey(): string {
   return randomBytes(24).toString("base64url");
 }
+
+/**
+ * "yyyy/mm/dd/hh" (UTC) — purely for keeping the bucket organized into
+ * manageable, browsable chunks as it grows. Contains no identifying
+ * information about the uploader or the file; the random storage key
+ * within each folder is still what actually makes an object's location
+ * unguessable, exactly as before this existed.
+ */
+export function datePathPrefix(date: Date = new Date()): string {
+  const yyyy = date.getUTCFullYear();
+  const mm = String(date.getUTCMonth() + 1).padStart(2, "0");
+  const dd = String(date.getUTCDate()).padStart(2, "0");
+  const hh = String(date.getUTCHours()).padStart(2, "0");
+  return `${yyyy}/${mm}/${dd}/${hh}`;
+}

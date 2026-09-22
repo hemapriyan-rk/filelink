@@ -36,11 +36,20 @@ export default async function DownloadPage({
   return (
     <main className="min-h-svh flex items-center justify-center px-4 py-8">
       <div className="w-full max-w-xl">
-        <div className="glass-panel rounded-2xl overflow-hidden">
+        <div
+          className={`glass-panel rounded-2xl overflow-hidden ${
+            file.is_admin_upload ? "outline outline-2 outline-[var(--crate-red)]" : ""
+          }`}
+        >
           <div className="px-8 sm:px-12 pt-8 pb-5 text-center">
             <p className="font-display text-4xl tracking-wide">
               <span className="text-[var(--crate-red)]">CRATE</span> LINK
             </p>
+            {file.is_admin_upload && (
+              <p className="mt-2 text-[10px] font-data tracking-wide inline-block rounded-full bg-[var(--crate-red)] text-white px-2.5 py-0.5">
+                ADMIN UPLOAD
+              </p>
+            )}
           </div>
 
           <div className="tear-line mx-10" />

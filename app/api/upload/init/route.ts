@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
-import { generatePublicToken, generateStorageKey, hashToken } from "@/lib/token";
+import { datePathPrefix, generatePublicToken, generateStorageKey, hashToken } from "@/lib/token";
 import { sanitizeFilename, sanitizeMimeType } from "@/lib/sanitize";
 import { checkRateLimit, clientIpFrom } from "@/lib/ratelimit";
 import { checkBan, recordStrike } from "@/lib/abuse";
@@ -171,7 +171,7 @@ export async function POST(req: NextRequest) {
   const safeMimeType = sanitizeMimeType(typeof mimeType === "string" ? mimeType : "");
 
   const storageKey = generateStorageKey();
-  const storagePath = `temp/${storageKey}`;
+  const storagePath = `temp/${datePathPrefix()}/${storageKey}`;
   const publicToken = generatePublicToken();
   const tokenHash = hashToken(publicToken);
   const expiresAt = new Date(Date.now() + expiresMinutes * 60 * 1000).toISOString();
@@ -189,6 +189,8 @@ export async function POST(req: NextRequest) {
       expires_at: expiresAt,
       max_downloads: normalizedMaxDownloads,
       status: "pending",
+      is_admin_upload: isAdmin,
+      uploader_ip: ip,
     })
     .select("id")
     .single();
@@ -215,5 +217,6 @@ export async function POST(req: NextRequest) {
     storagePath,
     publicToken,
     shareUrl: `${serverEnv.siteUrl}/f/${publicToken}`,
+    isAdmin,
   });
 }
