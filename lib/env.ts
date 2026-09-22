@@ -26,14 +26,33 @@ export const serverEnv = {
 };
 
 // Safe to import from client components.
+//
+// Next.js only inlines NEXT_PUBLIC_* values into the browser bundle when it
+// sees the literal, static expression `process.env.NEXT_PUBLIC_X` at build
+// time — that's a compile-time text replacement, not a runtime lookup (the
+// browser has no real process.env at all). Routing this through the generic
+// required(name) helper above (which reads process.env[name] with a
+// variable key) defeats that static analysis, so the value silently never
+// makes it into the client bundle. Each client-side getter below must
+// therefore reference its own NEXT_PUBLIC_ variable directly and statically.
+function requiredPublic(value: string | undefined, name: string): string {
+  if (!value) {
+    throw new Error(`Missing required environment variable: ${name}`);
+  }
+  return value;
+}
+
 export const clientEnv = {
   get supabaseUrl() {
-    return required("NEXT_PUBLIC_SUPABASE_URL");
+    return requiredPublic(process.env.NEXT_PUBLIC_SUPABASE_URL, "NEXT_PUBLIC_SUPABASE_URL");
   },
   get supabaseAnonKey() {
-    return required("NEXT_PUBLIC_SUPABASE_ANON_KEY");
+    return requiredPublic(
+      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
+      "NEXT_PUBLIC_SUPABASE_ANON_KEY"
+    );
   },
   get siteUrl() {
-    return required("NEXT_PUBLIC_SITE_URL");
+    return requiredPublic(process.env.NEXT_PUBLIC_SITE_URL, "NEXT_PUBLIC_SITE_URL");
   },
 };
