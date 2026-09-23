@@ -25,7 +25,7 @@ function formatExpires(stats: Stats): string {
   return formatDate(stats.expiresAt);
 }
 
-export function StatsToggle({ token }: { token: string }) {
+export function StatsToggle({ token, fileId }: { token: string; fileId?: string }) {
   const [open, setOpen] = useState(false);
   const [stats, setStats] = useState<Stats | null>(null);
   const [loading, setLoading] = useState(false);
@@ -40,7 +40,8 @@ export function StatsToggle({ token }: { token: string }) {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`/api/stats/${token}`);
+      const url = fileId ? `/api/stats/${token}?file=${fileId}` : `/api/stats/${token}`;
+      const res = await fetch(url);
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
         throw new Error(body.error || "Could not load stats.");

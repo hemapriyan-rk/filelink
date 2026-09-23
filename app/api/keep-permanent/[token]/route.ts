@@ -70,7 +70,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ tok
 
   const tokenHash = hashToken(token);
 
-  let promoted;
+  let promoted: { id: string; storagePath: string }[];
   try {
     promoted = await promoteToPermanent(tokenHash);
   } catch (err) {
@@ -78,23 +78,27 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ tok
     return NextResponse.json({ error: "Something went wrong." }, { status: 500 });
   }
 
-  if (!promoted) {
+  if (promoted.length === 0) {
     return NextResponse.json(
       { error: "This link is no longer available to modify." },
       { status: 404 }
     );
   }
 
-  if (promoted.storagePath.startsWith("temp/")) {
-    const newPath = promoted.storagePath.replace(/^temp\//, "perm/");
-    const admin = getSupabaseAdmin();
-    const { error: moveError } = await admin.storage
-      .from(STORAGE_BUCKET)
-      .move(promoted.storagePath, newPath);
+  // A crate is several files sharing one token — every file the update
+  // just promoted gets its storage object moved, independently, on a
+  // best-effort basis each. One file's move failing doesn't block or roll
+  // back the others; it just stays reachable at its old path until a
+  // retry, same reasoning as the single-file case (see the docstring above).
+  const admin = getSupabaseAdmin();
+  for (const file of promoted) {
+    if (!file.storagePath.startsWith("temp/")) continue;
+    const newPath = file.storagePath.replace(/^temp\//, "perm/");
+    const { error: moveError } = await admin.storage.from(STORAGE_BUCKET).move(file.storagePath, newPath);
 
     if (!moveError) {
       try {
-        await updateStoragePath(promoted.id, newPath);
+        await updateStoragePath(file.id, newPath);
       } catch (err) {
         console.error("keep-permanent path update failed", err);
       }
@@ -103,5 +107,5 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ tok
     }
   }
 
-  return NextResponse.json({ success: true });
+  return NextResponse.json({ success: true, count: promoted.length });
 }

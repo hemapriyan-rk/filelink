@@ -73,8 +73,22 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Invalid request body." }, { status: 400 });
   }
 
-  const { filename, mimeType, sizeBytes, expiresMinutes, maxDownloads, adminCode } = (body ??
+  const { filename, mimeType, sizeBytes, expiresMinutes, maxDownloads, adminCode, groupToken } = (body ??
     {}) as Record<string, unknown>;
+
+  // A "crate": several files uploaded under one shared token instead of
+  // each getting its own (see /api/upload/group-token and
+  // ARCHITECTURE.md §22). Format-validated against exactly what
+  // generatePublicToken() produces — 32 random bytes, base64url-encoded —
+  // so this can't be used to force an arbitrary attacker-chosen
+  // token_hash into the table.
+  let groupTokenHash: string | null = null;
+  if (typeof groupToken === "string") {
+    if (!/^[A-Za-z0-9_-]{43}$/.test(groupToken)) {
+      return NextResponse.json({ error: "Invalid group token." }, { status: 400 });
+    }
+    groupTokenHash = hashToken(groupToken);
+  }
 
   // An admin code only ever RAISES the ceiling — never lowers requirements,
   // never grants anything beyond bigger size/longer expiration. If it's
@@ -172,8 +186,8 @@ export async function POST(req: NextRequest) {
 
   const storageKey = generateStorageKey();
   const storagePath = `temp/${datePathPrefix()}/${storageKey}`;
-  const publicToken = generatePublicToken();
-  const tokenHash = hashToken(publicToken);
+  const publicToken = groupTokenHash ? (groupToken as string) : generatePublicToken();
+  const tokenHash = groupTokenHash ?? hashToken(publicToken);
   const expiresAt = new Date(Date.now() + expiresMinutes * 60 * 1000).toISOString();
 
   const admin = getSupabaseAdmin();

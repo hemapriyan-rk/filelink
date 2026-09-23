@@ -129,9 +129,9 @@ describe.skipIf(!hasEnv)("Crate Link lifecycle (live Supabase)", () => {
     });
 
     const promoted = await promoteToPermanent(tokenHash);
-    expect(promoted).not.toBeNull();
-    if (promoted && promoted.storagePath !== storagePath) {
-      createdPaths.push(promoted.storagePath);
+    expect(promoted).toHaveLength(1);
+    if (promoted[0].storagePath !== storagePath) {
+      createdPaths.push(promoted[0].storagePath);
     }
 
     await runCleanupSweep();

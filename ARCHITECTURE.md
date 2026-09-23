@@ -639,3 +639,67 @@ pressure on an already-small quota, and quietly keeping a copy of
 something a sender and recipient both reasonably expect to be gone once
 it expires. The Privacy Policy states this plainly rather than describing
 a backup posture the app doesn't actually have.
+
+## 22. Crates: one link, several files, individually browsable
+
+Alongside "bundle as .zip" (§16) and "separate links, one QR per file",
+there's a third multi-file option: several `files` rows sharing one
+`token_hash`, so the recipient sees one QR code / one link that opens a
+list of files and downloads whichever ones they want, individually — not
+a single archive to unpack, and not N separate links to distribute.
+
+**Schema.** `files.token_hash` originally had a `unique` constraint,
+because token → file was a 1:1 lookup. Supporting a group of files behind
+one token meant dropping that constraint (`supabase/migrations/
+0005_multi_file_groups.sql`) and replacing the lookup with
+`lookupActiveFiles(tokenHash)` (plural — `lib/queries.ts`), which returns
+every active, unexpired, under-its-download-limit row for that hash. A
+btree index on `token_hash` replaces the old unique index so the lookup
+stays fast at any group size. `lookupActiveFile` (singular) is kept as a
+thin wrapper (`rows[0] ?? null`) purely because the integration tests
+still exercise the original single-file path directly.
+
+**Minting a shared token ahead of upload.** A crate's token has to exist
+*before* any file is uploaded, since every file in the group needs to
+present the same `token_hash` at insert time — unlike the single-file and
+zip-bundle paths, where the token is generated inside `/api/upload/init`
+itself. `POST /api/upload/group-token` (rate-limited and ban-checked
+exactly like `/api/upload/init`) mints one `generatePublicToken()` value
+and returns it without touching the database at all — nothing is
+persisted until the first file actually confirms, so an abandoned crate
+mint (tab closed before any file uploads) leaves no orphaned row to clean
+up. The client then passes that value as `groupToken` on every per-file
+`/api/upload/init` call; the route hashes it, uses it as `token_hash`
+instead of generating a fresh one, and everything downstream (capacity
+gating, admin-size clamping, storage path, abuse checks) proceeds exactly
+as it does for a normal single-file upload.
+
+**Disambiguating downloads within a group.** `/api/download/[token]` and
+`/api/stats/[token]` both accept an optional `?file=<uuid>` query
+parameter. With it, they operate on that specific row; without it, they
+fall back to "the one active file for this token" and 404 if that's
+ambiguous (zero or more than one match) — this keeps every pre-existing
+single-file link working unchanged, since a single-file link's token
+still resolves to exactly one row. `consumeDownloadById` (the
+group-aware sibling of `consumeDownload`, §5) adds `and files.id =
+p_file_id` to the same atomic `UPDATE ... RETURNING` shape, so two
+recipients hitting different files in the same crate concurrently never
+contend with each other, and a download-limit on one file never affects
+its siblings.
+
+**Shared expiry, independent download counts.** All files in a crate are
+uploaded in the same request batch and given the same `expiresMinutes`,
+so one countdown at the top of `CrateFileList` is accurate for the whole
+group — there's no per-file expiry to reconcile. Download counts and
+remaining-download limits, by contrast, are tracked and shown per file
+(via `StatsToggle`'s `fileId` prop), because those are the numbers a
+sender actually needs when deciding whether a specific file has been
+picked up yet.
+
+**Keep Permanently promotes the whole group.** `promoteToPermanent`
+(`lib/queries.ts`) matches on `token_hash` alone, so it now returns every
+row that shared that hash, not a single row — `/api/keep-permanent/
+[token]` loops over the result and moves each one from `temp/` to
+`perm/` storage independently. This mirrors the product's mental model:
+a crate is presented and shared as one unit, so "keep this" means "keep
+all of it," not a per-file decision.

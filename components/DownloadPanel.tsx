@@ -6,10 +6,12 @@ import { StatsToggle } from "./StatsToggle";
 
 export function DownloadPanel({
   token,
+  fileId,
   expiresAt,
   isPermanent,
 }: {
   token: string;
+  fileId: string;
   expiresAt: string | null;
   isPermanent: boolean;
 }) {
@@ -32,12 +34,12 @@ export function DownloadPanel({
         onExpire={() => setExpired(true)}
       />
       <a
-        href={`/api/download/${token}`}
+        href={`/api/download/${token}?file=${fileId}`}
         className="w-full text-center rounded-md bg-[var(--crate-red)] text-white font-medium px-6 py-3 hover:bg-[var(--crate-red-deep)] transition-colors"
       >
         Download file
       </a>
-      <StatsToggle token={token} />
+      <StatsToggle token={token} fileId={fileId} />
     </div>
   );
 }

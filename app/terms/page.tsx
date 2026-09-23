@@ -136,7 +136,7 @@ export default function TermsPage() {
       <h2>11. Contact</h2>
       <p>
         For takedown requests, illegal-content reports, or legal inquiries, contact:{" "}
-        <a href="mailto:REPLACE_WITH_CONTACT_EMAIL">REPLACE_WITH_CONTACT_EMAIL</a>.
+        <a href="mailto:1.connectwithhemapriyan@gmail.com">1.connectwithhemapriyan@gmail.com</a>.
       </p>
     </LegalPage>
   );

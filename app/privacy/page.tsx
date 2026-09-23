@@ -111,7 +111,7 @@ export default function PrivacyPage() {
       <h2>9. Contact</h2>
       <p>
         For privacy questions, contact:{" "}
-        <a href="mailto:REPLACE_WITH_CONTACT_EMAIL">REPLACE_WITH_CONTACT_EMAIL</a>.
+        <a href="mailto:1.connectwithhemapriyan@gmail.com">1.connectwithhemapriyan@gmail.com</a>.
       </p>
     </LegalPage>
   );

@@ -49,6 +49,15 @@ interface FileResult {
   isAdmin: boolean;
 }
 
+interface GroupResult {
+  shareUrl: string;
+  publicToken: string;
+  filenames: string[];
+  expiresAt: string | null;
+  isPermanent: boolean;
+  isAdmin: boolean;
+}
+
 type QueueStatus = "queued" | "uploading" | "done" | "error";
 
 interface QueueItem {
@@ -184,9 +193,22 @@ function KeepPermanentlyControl({
 function ResultRow({ result }: { result: FileResult }) {
   const [copied, setCopied] = useState(false);
   const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
-  const [showQr, setShowQr] = useState(false);
+  const [showQr, setShowQr] = useState(true);
   const [permanent, setPermanent] = useState(result.isPermanent);
   const [expiresAt, setExpiresAt] = useState(result.expiresAt);
+
+  // Shown by default right after upload — a QR someone has to click to
+  // reveal defeats "hand your phone to a friend to scan" as the common
+  // case. generateQrDataUrl only ever encodes the share URL (lib/qr.ts).
+  useEffect(() => {
+    let cancelled = false;
+    generateQrDataUrl(result.shareUrl).then((url) => {
+      if (!cancelled) setQrDataUrl(url);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [result.shareUrl]);
 
   async function toggleQr() {
     if (!showQr && !qrDataUrl) {
@@ -285,6 +307,102 @@ function ResultRow({ result }: { result: FileResult }) {
   );
 }
 
+function GroupResultCard({ result }: { result: GroupResult }) {
+  const [copied, setCopied] = useState(false);
+  const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
+  const [permanent, setPermanent] = useState(result.isPermanent);
+  const [expiresAt, setExpiresAt] = useState(result.expiresAt);
+
+  useEffect(() => {
+    let cancelled = false;
+    generateQrDataUrl(result.shareUrl).then((url) => {
+      if (!cancelled) setQrDataUrl(url);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [result.shareUrl]);
+
+  async function copyLink() {
+    try {
+      await navigator.clipboard.writeText(result.shareUrl);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // non-fatal
+    }
+  }
+
+  function downloadQr() {
+    if (!qrDataUrl) return;
+    const a = document.createElement("a");
+    a.href = qrDataUrl;
+    a.download = "cratelink-qr-crate.png";
+    a.click();
+  }
+
+  return (
+    <div className="border border-[var(--line)] rounded-lg p-4 bg-white/70">
+      <p className="font-medium text-sm">
+        {result.filenames.length} files
+        {result.isAdmin && (
+          <span className="ml-2 align-middle inline-block rounded-full bg-[var(--crate-red)] text-white text-[10px] font-medium px-1.5 py-0.5 font-data">
+            ADMIN
+          </span>
+        )}
+      </p>
+      <CountdownTimer expiresAt={expiresAt} isPermanent={permanent} />
+
+      <ul className="mt-2 text-xs text-[var(--ink-soft)] max-h-24 overflow-y-auto">
+        {result.filenames.map((name, i) => (
+          <li key={i} className="truncate">
+            {name}
+          </li>
+        ))}
+      </ul>
+
+      {qrDataUrl && (
+        <div className="mt-3 flex justify-center">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={qrDataUrl}
+            alt="QR code linking to the crate"
+            width={140}
+            height={140}
+            className="rounded bg-white p-2 border border-[var(--line)]"
+          />
+        </div>
+      )}
+
+      <p className="font-data text-xs text-[var(--ink-soft)] break-all mt-2">{result.shareUrl}</p>
+
+      <div className="flex flex-wrap items-center gap-2 mt-3">
+        <button
+          onClick={copyLink}
+          className="rounded-md border border-[var(--crate-red)] text-[var(--crate-red)] px-3 py-1.5 text-xs font-medium hover:bg-[var(--crate-red)] hover:text-white transition-colors"
+        >
+          {copied ? "Copied!" : "Copy link"}
+        </button>
+        <button
+          onClick={downloadQr}
+          className="rounded-md border border-[var(--crate-red)] text-[var(--crate-red)] px-3 py-1.5 text-xs font-medium hover:bg-[var(--crate-red)] hover:text-white transition-colors"
+        >
+          Save QR
+        </button>
+        {!permanent && result.isAdmin && (
+          <KeepPermanentlyControl
+            publicToken={result.publicToken}
+            onPromoted={() => {
+              setPermanent(true);
+              setExpiresAt(null);
+            }}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
 export function UploadForm() {
   const [queue, setQueue] = useState<QueueItem[]>([]);
   const [expirationChoice, setExpirationChoice] = useState<string>(String(ALLOWED_EXPIRATIONS_MINUTES[0]));
@@ -301,6 +419,7 @@ export function UploadForm() {
   const [error, setError] = useState<string | null>(null);
   const [bannedUntil, setBannedUntil] = useState<string | null>(null);
   const [capacity, setCapacity] = useState<Capacity | null>(null);
+  const [groupResult, setGroupResult] = useState<GroupResult | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [dragActive, setDragActive] = useState(false);
 
@@ -435,7 +554,8 @@ export function UploadForm() {
   async function uploadOne(
     item: QueueItem,
     expiresMinutes: number,
-    maxDownloads: number | null
+    maxDownloads: number | null,
+    groupToken?: string
   ): Promise<QueueItem> {
     try {
       const initRes = await fetch("/api/upload/init", {
@@ -448,6 +568,7 @@ export function UploadForm() {
           expiresMinutes,
           maxDownloads,
           adminCode: adminCode.trim() || undefined,
+          groupToken,
         }),
       });
 
@@ -549,7 +670,90 @@ export function UploadForm() {
     setStage("ready");
   }
 
-  async function proceedUpload(asZip: boolean) {
+  async function handleGroupUpload(expiresMinutes: number, maxDownloads: number | null) {
+    let groupToken: string;
+    let shareUrl: string;
+    try {
+      const res = await fetch("/api/upload/group-token", { method: "POST" });
+      if (res.status === 403) {
+        const body = await res.json().catch(() => ({}));
+        if (body.bannedUntil) {
+          setBannedUntil(body.bannedUntil);
+          setStage("banned");
+          return;
+        }
+        throw new Error(body.error || "Request rejected.");
+      }
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error || "Could not start this crate.");
+      }
+      const data = await res.json();
+      groupToken = data.groupToken;
+      shareUrl = data.shareUrl;
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not start this crate.");
+      setStage("idle");
+      return;
+    }
+
+    setQueue((prev) => prev.map((q) => ({ ...q, status: "uploading" as const, progress: 0 })));
+
+    const pending = [...queue];
+    const results: QueueItem[] = [];
+    let cursor = 0;
+    let hitBan = false;
+
+    async function worker() {
+      while (cursor < pending.length && !hitBan) {
+        const idx = cursor++;
+        try {
+          const done = await uploadOne(pending[idx], expiresMinutes, maxDownloads, groupToken);
+          results[idx] = done;
+          setQueue((prev) => prev.map((q) => (q.id === done.id ? done : q)));
+        } catch (err) {
+          hitBan = true;
+          const banned = (err as { bannedUntil?: string }).bannedUntil ?? null;
+          setBannedUntil(banned);
+          setStage("banned");
+        }
+      }
+    }
+
+    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, pending.length) }, worker));
+
+    if (hitBan) return;
+
+    const finalResults = results.filter((r): r is QueueItem => !!r && r.status === "done" && !!r.result);
+    if (finalResults.length === 0) {
+      setError("None of the files in this crate could be sent.");
+      setStage("ready");
+      return;
+    }
+
+    const group: GroupResult = {
+      shareUrl,
+      publicToken: groupToken,
+      filenames: finalResults.map((r) => r.result!.filename),
+      expiresAt: finalResults[0].result!.expiresAt,
+      isPermanent: false,
+      isAdmin: finalResults[0].result!.isAdmin,
+    };
+    setGroupResult(group);
+    saveResults([
+      {
+        shareUrl: group.shareUrl,
+        publicToken: group.publicToken,
+        filename: `${group.filenames.length} files`,
+        expiresAt: group.expiresAt,
+        isPermanent: group.isPermanent,
+        isAdmin: group.isAdmin,
+      },
+    ]);
+    setStage("ready");
+  }
+
+  async function proceedUpload(mode: "zip" | "separate" | "group") {
     const resolvedExpires = resolveExpiresMinutes();
     const resolvedDownloads = resolveMaxDownloads();
     if (resolvedExpires === null || resolvedDownloads === undefined) {
@@ -563,8 +767,13 @@ export function UploadForm() {
 
     setStage("uploading");
 
-    if (asZip) {
+    if (mode === "zip") {
       await handleZipUpload(expiresMinutes, maxDownloads);
+      return;
+    }
+
+    if (mode === "group") {
+      await handleGroupUpload(expiresMinutes, maxDownloads);
       return;
     }
 
@@ -624,7 +833,7 @@ export function UploadForm() {
       return;
     }
 
-    proceedUpload(false);
+    proceedUpload("separate");
   }
 
   function reset() {
@@ -632,6 +841,7 @@ export function UploadForm() {
     setStage("idle");
     setError(null);
     setZipProgress(null);
+    setGroupResult(null);
     try {
       sessionStorage.removeItem(SESSION_KEY);
     } catch {
@@ -665,21 +875,28 @@ export function UploadForm() {
         <p className="text-sm text-[var(--ink-soft)]">{queue.length} files selected.</p>
         <div className="flex flex-col gap-2.5">
           <button
-            onClick={() => proceedUpload(true)}
+            onClick={() => proceedUpload("group")}
             className="w-full rounded-md bg-[var(--crate-red)] text-white font-medium py-3 hover:bg-[var(--crate-red-deep)] transition-colors"
           >
-            One QR code (bundle as .zip)
+            One QR code, recipient picks files
           </button>
           <button
-            onClick={() => proceedUpload(false)}
+            onClick={() => proceedUpload("zip")}
+            className="w-full rounded-md border border-[var(--crate-red)] text-[var(--crate-red)] font-medium py-3 hover:bg-[var(--crate-red)] hover:text-white transition-colors"
+          >
+            One QR code, bundled as .zip
+          </button>
+          <button
+            onClick={() => proceedUpload("separate")}
             className="w-full rounded-md border border-[var(--crate-red)] text-[var(--crate-red)] font-medium py-3 hover:bg-[var(--crate-red)] hover:text-white transition-colors"
           >
             Separate links ({queue.length} QR codes)
           </button>
         </div>
         <p className="text-xs text-[var(--ink-soft)]">
-          Bundling compresses everything into one file — great for text, won&apos;t shrink photos
-          or video much, and the recipient has to unzip it.
+          &quot;Recipient picks files&quot; keeps files separate but under one link — no
+          extraction needed. Bundling as .zip compresses everything into one file instead — helps
+          for text, won&apos;t shrink photos or video much, and the recipient has to unzip it.
         </p>
         <button onClick={() => setStage("idle")} className="text-xs text-[var(--ink-soft)] underline">
           Back
@@ -696,6 +913,19 @@ export function UploadForm() {
           Crate Link is out of storage space right now. Files expire and get cleaned up
           automatically over time, freeing up room — please check back in a while.
         </p>
+      </div>
+    );
+  }
+
+  if (stage === "ready" && groupResult) {
+    return (
+      <div className="flex flex-col gap-4">
+        <p className="font-display text-2xl text-[var(--crate-red)] text-center">CRATE READY</p>
+        <GroupResultCard result={groupResult} />
+        {error && <p className="text-sm text-[var(--crate-red)] text-center">{error}</p>}
+        <button onClick={reset} className="text-xs text-[var(--ink-soft)] underline text-center mt-1">
+          Send more files
+        </button>
       </div>
     );
   }
