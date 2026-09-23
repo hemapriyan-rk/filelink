@@ -18,7 +18,7 @@ export default function PrivacyPage() {
         <li>a random share token (its cryptographic hash, not the raw token — see below);</li>
         <li>expiration time, download limit, and current download count;</li>
         <li>the uploading device&apos;s IP address and the upload timestamp;</li>
-        <li>whether the upload used the admin override (§8 of the Terms).</li>
+        <li>whether the upload used the admin override (§10 of the Terms).</li>
       </ul>
       <p>We do not collect names, email addresses, or any other account information — there is nothing to collect, since there are no accounts.</p>
 
@@ -30,7 +30,7 @@ export default function PrivacyPage() {
           repeatedly try to exceed upload limits or brute-force the admin code;
         </li>
         <li>
-          responding to valid legal requests and preserving evidence where required by law (§7 of
+          responding to valid legal requests and preserving evidence where required by law (§9 of
           the Terms) — for example, if a court or authorized government body lawfully requests
           information about who uploaded a specific reported file.
         </li>
@@ -93,7 +93,7 @@ export default function PrivacyPage() {
         Only the Service&apos;s operator, via credentials that never reach the browser or any
         third party. The database enforces default-deny access at the database level for every
         role except the server itself. We do not sell, rent, or share this data with third
-        parties, except where required to respond to a valid legal request (§7 of the Terms).
+        parties, except where required to respond to a valid legal request (§9 of the Terms).
       </p>
 
       <h2>7. Children&apos;s privacy</h2>

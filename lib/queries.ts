@@ -110,16 +110,33 @@ export async function updateStoragePath(id: string, newPath: string): Promise<vo
   if (error) throw error;
 }
 
+/**
+ * Checks storage directly rather than trusting the client's word that the
+ * PUT to the signed URL succeeded — see /api/upload/confirm. Retries a
+ * few times with a short delay: Supabase Storage's list/read API has a
+ * brief (typically well under a second) read-after-write lag under rapid
+ * successive requests, most likely to be visible on a small/fast upload
+ * where confirm fires almost immediately after the PUT completes. Without
+ * this, that ordinary lag could surface to the uploader as a false
+ * "Upload did not complete" failure for a file that actually landed fine.
+ */
 export async function objectExists(storagePath: string): Promise<boolean> {
   const admin = getSupabaseAdmin();
   const lastSlash = storagePath.lastIndexOf("/");
   const folder = storagePath.slice(0, lastSlash);
   const name = storagePath.slice(lastSlash + 1);
 
-  const { data, error } = await admin.storage.from(STORAGE_BUCKET).list(folder, {
-    limit: 1,
-    search: name,
-  });
-  if (error) throw error;
-  return !!data?.some((entry) => entry.name === name);
+  const delaysMs = [0, 300, 700];
+  for (let attempt = 0; attempt < delaysMs.length; attempt++) {
+    if (delaysMs[attempt] > 0) {
+      await new Promise((resolve) => setTimeout(resolve, delaysMs[attempt]));
+    }
+    const { data, error } = await admin.storage.from(STORAGE_BUCKET).list(folder, {
+      limit: 1,
+      search: name,
+    });
+    if (error) throw error;
+    if (data?.some((entry) => entry.name === name)) return true;
+  }
+  return false;
 }

@@ -170,23 +170,28 @@ number it actually controls:
   faster turnover means sooner cleanup means sooner free space. Enforced
   server-side too (`/api/upload/init` rejects any other expiration with a
   409 while near-full), not just hidden in the UI.
-- **full** (97%+): new uploads are rejected outright (503) — the form
-  shows a "Server Full" message instead, telling the visitor to check
-  back later. Existing links, downloads, and "Recent links" (§8) still
-  work; only *new* uploads are blocked. This applies even with a valid
-  admin code — raising the ceiling doesn't help when there's no room left
-  to raise into.
+- **full** (97%+): new uploads without a valid admin code are rejected
+  outright (503) — the form shows a "Server Full" message instead,
+  telling the visitor to check back later. Existing links, downloads, and
+  "Recent links" (§8) still work; only *new* non-admin uploads are
+  blocked. A valid admin code bypasses this block (§26 in
+  ARCHITECTURE.md) — the file-size ceiling still keeps a real safety
+  margin below it, so this can't actually overrun capacity, it just stops
+  treating "full" as an outright refusal for the operator's own use.
 
 **Abuse bans.** Every rejected attempt to exceed the standard limits
 without a valid admin code (oversized file, over-long expiration, a wrong
 admin code, or repeatedly tripping the request-rate limiter) counts as a
-strike against the requester's IP. Reaching `STRIKE_THRESHOLD` (5) strikes
+strike against the requester's IP. Reaching `STRIKE_THRESHOLD` (3) strikes
 within `STRIKE_WINDOW_MINUTES` (30) bans that IP for `BASE_BAN_MINUTES`
-(1 hour), doubling on each repeat offense up to `MAX_BAN_MINUTES`
-(24 hours). This is tracked in Postgres (`abuse_ips` table,
+(2 hours), doubling on each repeat offense up to `MAX_BAN_MINUTES`
+(3 days). This is tracked in Postgres (`abuse_ips` table,
 `supabase/migrations/0002_abuse.sql`), not in memory — an in-memory ban
 would reset on every serverless cold start and provide essentially no real
-protection. See `ARCHITECTURE.md` §14 for the full rationale.
+protection. A valid admin code bypasses the ban and rate-limit checks
+entirely (§26 in ARCHITECTURE.md) — these numbers exist to guard
+anonymous public traffic, not the operator's own use of their own tool.
+See `ARCHITECTURE.md` §14 for the full rationale.
 
 **Multi-file uploads.** The upload form accepts up to `MAX_FILES_PER_BATCH`
 (50) files at once, sharing one set of expiration/downloads/admin-code

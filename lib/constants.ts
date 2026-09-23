@@ -77,8 +77,18 @@ export const CLEANUP_BATCH_SIZE = 200;
 export const MAX_FILES_PER_BATCH = 50;
 
 // Abuse strikes -> escalating temporary bans (see lib/abuse.ts and
-// supabase/migrations/0002_abuse.sql for the exact mechanics).
+// supabase/migrations/0002_abuse.sql for the exact mechanics). A valid
+// admin TOTP code bypasses this entirely (see app/api/upload/init and
+// app/api/upload/group-token) — these numbers exist to guard anonymous
+// public traffic, not the operator's own use of their own tool.
 export const STRIKE_WINDOW_MINUTES = 30;
-export const STRIKE_THRESHOLD = 5;
-export const BASE_BAN_MINUTES = 60;
-export const MAX_BAN_MINUTES = 24 * 60;
+export const STRIKE_THRESHOLD = 3;
+export const BASE_BAN_MINUTES = 120;
+export const MAX_BAN_MINUTES = 3 * 24 * 60;
+
+// Per-IP request limits for anonymous traffic (see clientIpFrom +
+// checkRateLimit call sites). A valid admin code bypasses these too.
+export const UPLOAD_INIT_RATE_LIMIT = 30;
+export const UPLOAD_INIT_RATE_WINDOW_MS = 10 * 60 * 1000;
+export const GROUP_TOKEN_RATE_LIMIT = 10;
+export const GROUP_TOKEN_RATE_WINDOW_MS = 10 * 60 * 1000;

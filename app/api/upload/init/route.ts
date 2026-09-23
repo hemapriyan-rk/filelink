@@ -18,6 +18,8 @@ import {
   MIN_EXPIRATION_MINUTES,
   NEAR_FULL_EXPIRATION_MINUTES,
   STORAGE_BUCKET,
+  UPLOAD_INIT_RATE_LIMIT,
+  UPLOAD_INIT_RATE_WINDOW_MS,
 } from "@/lib/constants";
 
 const ABUSE_WARNING = " Repeated attempts to bypass this limit will result in a temporary ban.";
@@ -38,23 +40,57 @@ function bannedResponse(bannedUntil: string | null) {
 export async function POST(req: NextRequest) {
   const ip = clientIpFrom(req.headers);
 
-  const ban = await checkBan(ip);
-  if (ban.banned) {
-    return bannedResponse(ban.bannedUntil);
+  let body: unknown;
+  try {
+    body = await req.json();
+  } catch {
+    return NextResponse.json({ error: "Invalid request body." }, { status: 400 });
   }
 
-  const rate = checkRateLimit(`upload-init:${ip}`, 60, 10 * 60 * 1000);
-  if (!rate.allowed) {
-    const strike = await recordStrike(ip);
-    if (strike.banned) return bannedResponse(strike.bannedUntil);
-    return NextResponse.json(
-      { error: "Too many uploads. Please try again shortly." },
-      { status: 429, headers: { "Retry-After": String(rate.retryAfterSeconds) } }
-    );
+  const { filename, mimeType, sizeBytes, expiresMinutes, maxDownloads, adminCode, groupToken } = (body ??
+    {}) as Record<string, unknown>;
+
+  // A valid admin code is checked FIRST, before the ban/rate-limit checks
+  // below, precisely so that a correct code can skip them — the operator's
+  // own legitimate use of their own tool should never be blocked by
+  // guardrails meant for anonymous traffic (Terms of Service §10). A wrong
+  // code still costs a strike, same as before; brute-forcing a 6-digit
+  // rotating code is exactly what this system exists to deter.
+  let isAdmin = false;
+  if (typeof adminCode === "string" && adminCode.trim().length > 0) {
+    const secret = serverEnv.adminTotpSecret;
+    isAdmin = !!secret && verifyTotp(secret, adminCode);
+    if (!isAdmin) {
+      const strike = await recordStrike(ip);
+      if (strike.banned) return bannedResponse(strike.bannedUntil);
+      return NextResponse.json({ error: "Invalid admin code." }, { status: 403 });
+    }
+  }
+
+  if (!isAdmin) {
+    const ban = await checkBan(ip);
+    if (ban.banned) {
+      return bannedResponse(ban.bannedUntil);
+    }
+
+    const rate = checkRateLimit(`upload-init:${ip}`, UPLOAD_INIT_RATE_LIMIT, UPLOAD_INIT_RATE_WINDOW_MS);
+    if (!rate.allowed) {
+      const strike = await recordStrike(ip);
+      if (strike.banned) return bannedResponse(strike.bannedUntil);
+      return NextResponse.json(
+        { error: "Too many uploads. Please try again shortly." },
+        { status: 429, headers: { "Retry-After": String(rate.retryAfterSeconds) } }
+      );
+    }
   }
 
   const capacity = await getCapacity();
-  if (capacity.status === "full") {
+  // Admin bypasses the hard "full" block too — the maxFileSize calculation
+  // just below still keeps a real safety margin, so this can never actually
+  // push storage past its limit; it just stops treating "full" as an
+  // outright refusal for the one code path that's allowed to push closer
+  // to the edge.
+  if (capacity.status === "full" && !isAdmin) {
     return NextResponse.json(
       {
         error:
@@ -65,16 +101,6 @@ export async function POST(req: NextRequest) {
       { status: 503 }
     );
   }
-
-  let body: unknown;
-  try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid request body." }, { status: 400 });
-  }
-
-  const { filename, mimeType, sizeBytes, expiresMinutes, maxDownloads, adminCode, groupToken } = (body ??
-    {}) as Record<string, unknown>;
 
   // A "crate": several files uploaded under one shared token instead of
   // each getting its own (see /api/upload/group-token and
@@ -88,22 +114,6 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Invalid group token." }, { status: 400 });
     }
     groupTokenHash = hashToken(groupToken);
-  }
-
-  // An admin code only ever RAISES the ceiling — never lowers requirements,
-  // never grants anything beyond bigger size/longer expiration. If it's
-  // wrong, that's a strike (brute-force attempts against a 6-digit rotating
-  // code are exactly the kind of thing this system exists to deter); if
-  // it's simply absent, that's just a normal request at standard limits.
-  let isAdmin = false;
-  if (typeof adminCode === "string" && adminCode.trim().length > 0) {
-    const secret = serverEnv.adminTotpSecret;
-    isAdmin = !!secret && verifyTotp(secret, adminCode);
-    if (!isAdmin) {
-      const strike = await recordStrike(ip);
-      if (strike.banned) return bannedResponse(strike.bannedUntil);
-      return NextResponse.json({ error: "Invalid admin code." }, { status: 403 });
-    }
   }
 
   // Even an admin code can't outrun actual available space — it raises

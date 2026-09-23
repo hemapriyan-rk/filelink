@@ -761,3 +761,45 @@ counts and limits are consumed correctly and independently, exactly as if
 the recipient had clicked each one by hand. Clicks are staggered by 500ms
 rather than fired in the same tick, since browsers tend to silently drop
 downloads beyond the first one or two triggered without a gap.
+
+## 25. A retry for storage read-after-write lag
+
+`objectExists` (`lib/queries.ts`), called from `/api/upload/confirm` to
+verify the uploaded bytes actually landed before flipping a file to
+"active", now retries up to three times (0ms, 300ms, 700ms) instead of
+checking once. Supabase Storage's list API can lag briefly behind a very
+recent write under rapid successive requests — the project's own test
+suite already had to work around exactly this (`sweepUntilCaught()` in
+`tests/integration/lifecycle.test.ts`, written after a flaky test traced
+to this same lag). Confirm is the one place in the app where that lag is
+user-visible: it fires immediately after the PUT to the signed URL
+completes, so a small file on a fast connection is precisely the case
+most likely to hit it, and without a retry it could return a false
+"Upload did not complete" for a file that actually uploaded fine.
+
+## 26. The admin override bypasses rate-limiting and bans, not just size/time ceilings
+
+Originally, a request still had to clear the IP ban check and the
+per-IP rate limit *before* its admin code was ever read — so the
+operator's own tool could, in principle, lock its own operator out during
+heavy personal use or repeated testing, the one case the override exists
+to serve. `/api/upload/init` and `/api/upload/group-token` now check the
+admin code first: a valid code skips the ban and rate-limit checks
+entirely for that request, and only a normal (no-code or wrong-code)
+request is subject to them. A wrong code still costs a strike exactly as
+before — this changes *when* the code is checked, not what an incorrect
+one does.
+
+The hard "storage full" block (§18) is exempted the same way, for the
+same reason. This doesn't create a real risk of overrunning capacity: the
+admin file-size ceiling was already computed as `remainingBytes -
+ADMIN_UPLOAD_SAFETY_MARGIN_BYTES` (§18), so once there's less than the
+safety margin left, that ceiling collapses toward zero and the ordinary
+size check below it rejects the upload anyway — "full" stops being an
+outright refusal, but the physical limit underneath it is untouched.
+
+With the operator now fully exempt, the limits guarding anonymous public
+traffic were tightened, since they no longer need headroom for the
+operator's own use: `STRIKE_THRESHOLD` 5 → 3, `BASE_BAN_MINUTES` 60 → 120,
+`MAX_BAN_MINUTES` 24h → 3 days, and the upload-init and group-token rate
+limits both roughly halved (`lib/constants.ts`).

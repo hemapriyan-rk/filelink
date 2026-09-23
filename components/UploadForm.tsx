@@ -674,7 +674,11 @@ export function UploadForm() {
     let groupToken: string;
     let shareUrl: string;
     try {
-      const res = await fetch("/api/upload/group-token", { method: "POST" });
+      const res = await fetch("/api/upload/group-token", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ adminCode: adminCode.trim() || undefined }),
+      });
       if (res.status === 403) {
         const body = await res.json().catch(() => ({}));
         if (body.bannedUntil) {
