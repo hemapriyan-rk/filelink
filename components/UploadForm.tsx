@@ -731,11 +731,31 @@ export function UploadForm() {
       return;
     }
 
+    // Re-sync every file's expiry to this moment — everything in the crate
+    // just finished uploading, so the shared countdown should start now,
+    // not at whichever individual file confirmed first. Best-effort: if
+    // this fails, each file just keeps the slightly earlier expiry its own
+    // confirm already gave it.
+    let syncedExpiresAt = finalResults[0].result!.expiresAt;
+    try {
+      const finalizeRes = await fetch("/api/upload/group-finalize", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ groupToken }),
+      });
+      if (finalizeRes.ok) {
+        const finalized = await finalizeRes.json();
+        syncedExpiresAt = finalized.expiresAt;
+      }
+    } catch {
+      // non-fatal — fall back to the first file's own expiry
+    }
+
     const group: GroupResult = {
       shareUrl,
       publicToken: groupToken,
       filenames: finalResults.map((r) => r.result!.filename),
-      expiresAt: finalResults[0].result!.expiresAt,
+      expiresAt: syncedExpiresAt,
       isPermanent: false,
       isAdmin: finalResults[0].result!.isAdmin,
     };

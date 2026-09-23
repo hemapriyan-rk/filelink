@@ -43,6 +43,24 @@ export function CrateFileList({
   isPermanent: boolean;
 }) {
   const [expired, setExpired] = useState(false);
+  const [downloadingAll, setDownloadingAll] = useState(false);
+
+  async function handleDownloadAll() {
+    setDownloadingAll(true);
+    for (const file of files) {
+      const link = document.createElement("a");
+      link.href = `/api/download/${token}?file=${file.id}`;
+      link.rel = "noopener";
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      // Staggered rather than fired all at once — clicking several
+      // download-triggering links in the same tick tends to get the later
+      // ones silently dropped by the browser's popup/download guard.
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+    setDownloadingAll(false);
+  }
 
   if (expired) {
     return (
@@ -57,6 +75,19 @@ export function CrateFileList({
     <div className="flex flex-col gap-4">
       <div className="text-center">
         <CountdownTimer expiresAt={expiresAt} isPermanent={isPermanent} onExpire={() => setExpired(true)} />
+      </div>
+
+      <div className="text-center">
+        <button
+          onClick={handleDownloadAll}
+          disabled={downloadingAll}
+          className="rounded-md bg-[var(--crate-red)] text-white text-sm font-medium px-4 py-2 hover:bg-[var(--crate-red-deep)] transition-colors disabled:opacity-60"
+        >
+          {downloadingAll ? "Starting downloads…" : `Download all (${files.length} files)`}
+        </button>
+        <p className="text-xs text-[var(--ink-soft)] mt-1">
+          Your browser may ask permission to download multiple files.
+        </p>
       </div>
 
       <div className="flex flex-col gap-2.5 max-h-[420px] overflow-y-auto pr-1">

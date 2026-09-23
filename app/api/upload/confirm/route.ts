@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase-admin";
 import { objectExists } from "@/lib/queries";
+import { EXPIRATION_START_BUFFER_SECONDS } from "@/lib/constants";
 
 /**
  * Called by the client after it has finished PUTting the file bytes
@@ -9,6 +10,13 @@ import { objectExists } from "@/lib/queries";
  * storage before flipping the row to "active" — this prevents an
  * interrupted/failed upload from ever producing a shareable link that 404s
  * on download.
+ *
+ * expires_at is computed HERE, not at /api/upload/init, precisely because
+ * this is the moment the file is actually usable — computing it at init
+ * would start the clock before a single byte was uploaded, silently
+ * eating into the expiration window of anything large/slow enough to take
+ * a while to transfer. EXPIRATION_START_BUFFER_SECONDS adds a little more
+ * room on top for the confirm round trip and QR render.
  */
 export async function POST(req: NextRequest) {
   let body: unknown;
@@ -26,7 +34,7 @@ export async function POST(req: NextRequest) {
   const admin = getSupabaseAdmin();
   const { data: row, error } = await admin
     .from("files")
-    .select("id, storage_path, status, expires_at")
+    .select("id, storage_path, status, expiration_minutes")
     .eq("id", uploadId)
     .eq("status", "pending")
     .maybeSingle();
@@ -47,9 +55,13 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  const expiresAt = new Date(
+    Date.now() + (row.expiration_minutes ?? 0) * 60 * 1000 + EXPIRATION_START_BUFFER_SECONDS * 1000
+  ).toISOString();
+
   const { error: updateError } = await admin
     .from("files")
-    .update({ status: "active" })
+    .update({ status: "active", expires_at: expiresAt })
     .eq("id", row.id)
     .eq("status", "pending");
 
@@ -58,5 +70,5 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Could not confirm upload." }, { status: 500 });
   }
 
-  return NextResponse.json({ success: true, expiresAt: row.expires_at });
+  return NextResponse.json({ success: true, expiresAt });
 }

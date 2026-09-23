@@ -1,0 +1,13 @@
+-- Fixes a real bug: expires_at was previously computed at /api/upload/init
+-- time, before the file's bytes were even uploaded to storage. For a large
+-- file (or a slow connection), the upload itself could eat a meaningful
+-- chunk of the expiration window before the recipient ever saw a QR code —
+-- e.g. a 3 GB admin upload taking 5 minutes to transfer against a 10-minute
+-- expiration would leave only ~5 minutes once the link was actually usable.
+--
+-- The fix (see app/api/upload/confirm/route.ts) is to compute expires_at at
+-- CONFIRM time instead — once the bytes have actually landed in storage —
+-- plus a small fixed buffer for the QR-display round trip. That requires
+-- remembering the originally-requested (and already server-validated)
+-- duration on the row, since it's no longer computed until confirm.
+alter table files add column if not exists expiration_minutes integer;

@@ -703,3 +703,61 @@ row that shared that hash, not a single row — `/api/keep-permanent/
 `perm/` storage independently. This mirrors the product's mental model:
 a crate is presented and shared as one unit, so "keep this" means "keep
 all of it," not a per-file decision.
+
+## 23. Expiration starts at confirm, not at init
+
+A real bug: `expires_at` used to be computed in `/api/upload/init`, before
+the client had uploaded a single byte to storage. For a small file this is
+unnoticeable, but for a large one — especially the multi-GB sizes an admin
+code allows — the upload itself could eat a meaningful chunk of the
+expiration window before the recipient ever saw a working link. A 3 GB
+file taking 5 minutes to transfer against a 10-minute expiration left only
+~5 minutes once the link was actually usable, not 10.
+
+The fix moves the computation to `/api/upload/confirm` (`lib/constants.ts:
+EXPIRATION_START_BUFFER_SECONDS`), which only runs after `objectExists`
+has verified the bytes actually landed in storage — i.e. the moment the
+file is genuinely downloadable. `expires_at` is left `null` at insert time
+(already nullable — permanent files use the same `null`) and the
+originally-requested duration is persisted separately as
+`expiration_minutes` (`supabase/migrations/0006_confirm_time_expiry.sql`)
+so confirm can read back a value that was already fully validated at init,
+rather than re-trusting a fresh one from the client. On top of that,
+`EXPIRATION_START_BUFFER_SECONDS` (60s) pads the window a little further,
+covering the confirm round trip and the instant it takes the browser to
+render the QR code — the buffer exists so "the timer started" and "the
+recipient can see the link" are never separated by more than about a
+minute, no matter how slow the confirm request itself is.
+
+**Crates need one more step.** A crate's files each confirm independently,
+at whatever moment they individually finish uploading — under the fix
+above, that means each file would start with a *slightly* different
+`expires_at`, even though `CrateFileList` renders one shared countdown for
+the whole group. `POST /api/upload/group-finalize`
+(`app/api/upload/group-finalize/route.ts`) closes that gap: once the
+client has confirmed every file in the batch, it calls this once, and the
+server re-syncs every row sharing the crate's `token_hash` to one
+`expires_at`, computed from that moment — the true "everything's ready"
+point, not whichever file happened to finish first. It re-derives
+`expiration_minutes` from the rows themselves rather than trusting a
+duration in the request body, for the same reason confirm does. If this
+call never completes (network failure, tab closed early), the crate
+doesn't break — each file simply keeps the slightly earlier `expires_at`
+its own confirm already gave it, a harmless degradation rather than a
+broken link.
+
+## 24. Download all, on the recipient's crate page
+
+`CrateFileList` adds a "Download all" button alongside the existing
+per-file download links. It doesn't bundle anything server-side — that
+would mean fetching every file's bytes through the recipient's own
+browser just to re-zip them, adding a full extra round trip through
+memory for data that could otherwise go straight from Supabase Storage to
+disk. Instead it does exactly what clicking each file's own "Download"
+link individually would do — one `<a href="/api/download/...">` per file,
+programmatically clicked in sequence — just automated. Each click still
+goes through the exact same per-file download endpoint, so download
+counts and limits are consumed correctly and independently, exactly as if
+the recipient had clicked each one by hand. Clicks are staggered by 500ms
+rather than fired in the same tick, since browsers tend to silently drop
+downloads beyond the first one or two triggered without a gap.

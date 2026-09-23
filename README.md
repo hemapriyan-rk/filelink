@@ -55,17 +55,23 @@ Supabase Dashboard:
    `consume_download_by_id` function backing crates — multiple files
    sharing one link (§22 in ARCHITECTURE.md).
 
-7. **Storage → New bucket**: name it exactly `droplink`, and leave it
+7. **SQL Editor → New query** one more time, paste the contents of
+   `supabase/migrations/0006_confirm_time_expiry.sql`, and run it. This adds
+   the `expiration_minutes` column backing confirm-time expiration (§23 in
+   ARCHITECTURE.md) — a file's countdown now starts once it's actually
+   finished uploading, not when the upload began.
+
+8. **Storage → New bucket**: name it exactly `droplink`, and leave it
    **private** (do not enable "Public bucket"). No further bucket
    configuration is needed — all access goes through signed URLs minted by
    the server.
 
-8. Generate a `CRON_SECRET` (any long random value, e.g.
+9. Generate a `CRON_SECRET` (any long random value, e.g.
    `openssl rand -hex 32`) and set it in `.env.local` and later in Vercel
    (and as a GitHub Actions repository secret of the same name — see §10).
 
-9. (Optional) Set up the admin override code, and/or set
-   `STORAGE_QUOTA_BYTES` to match your actual plan — see §6.
+10. (Optional) Set up the admin override code, and/or set
+    `STORAGE_QUOTA_BYTES` to match your actual plan — see §6.
 
 ## 3. Environment variables
 
@@ -193,8 +199,11 @@ options. A single file skips this and ships immediately as before
   share one token — one link, one QR code — and the recipient's page lists
   every file individually with its own download button and download
   count, downloading whichever ones they want rather than being forced
-  into one archive. See `ARCHITECTURE.md` §22 for the schema change
-  (`supabase/migrations/0005_multi_file_groups.sql`) this required.
+  into one archive. A "Download all" button triggers each file's own
+  download link in sequence, so counts/limits are still consumed exactly
+  as if each were clicked by hand. See `ARCHITECTURE.md` §22 for the
+  schema change (`supabase/migrations/0005_multi_file_groups.sql`) this
+  required.
 - **One QR code, bundled as .zip**: the browser compresses all selected
   files into a single ZIP, streamed straight into the compressor a chunk
   at a time (`lib/zip.ts`, via `fflate`'s streaming API — never holding a

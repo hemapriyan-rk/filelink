@@ -188,10 +188,14 @@ export async function POST(req: NextRequest) {
   const storagePath = `temp/${datePathPrefix()}/${storageKey}`;
   const publicToken = groupTokenHash ? (groupToken as string) : generatePublicToken();
   const tokenHash = groupTokenHash ?? hashToken(publicToken);
-  const expiresAt = new Date(Date.now() + expiresMinutes * 60 * 1000).toISOString();
 
   const admin = getSupabaseAdmin();
 
+  // expires_at is deliberately NOT set here — the clock shouldn't start
+  // until the file has actually finished uploading (see
+  // app/api/upload/confirm/route.ts). expiresMinutes is already fully
+  // validated above, so it's safe to persist and trust again at confirm
+  // time without re-validating.
   const { data: row, error: insertError } = await admin
     .from("files")
     .insert({
@@ -200,7 +204,7 @@ export async function POST(req: NextRequest) {
       original_filename: safeFilename,
       mime_type: safeMimeType,
       size_bytes: sizeBytes,
-      expires_at: expiresAt,
+      expiration_minutes: expiresMinutes,
       max_downloads: normalizedMaxDownloads,
       status: "pending",
       is_admin_upload: isAdmin,

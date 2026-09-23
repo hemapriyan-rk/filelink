@@ -61,6 +61,14 @@ export const ADMIN_UPLOAD_SAFETY_MARGIN_BYTES = 50 * 1024 * 1024; // 50 MB
 
 export const SIGNED_DOWNLOAD_URL_TTL_SECONDS = 60;
 
+// Expiration only starts counting once the file has actually finished
+// uploading and been confirmed (see app/api/upload/confirm/route.ts) — not
+// at /api/upload/init, before a single byte has been sent. This buffer adds
+// a little extra room on top of that confirm moment, covering the round
+// trip of the confirm request itself and the instant it takes the browser
+// to render the QR code the recipient actually sees.
+export const EXPIRATION_START_BUFFER_SECONDS = 60;
+
 export const PENDING_UPLOAD_TTL_MS = 60 * 60 * 1000; // 1 hour
 
 export const CLEANUP_BATCH_SIZE = 200;
